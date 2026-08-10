@@ -11,8 +11,8 @@ require (
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/google/go-github/v73 v73.0.0
 	github.com/jobs-build/amber-store-core v0.0.0-20260727080459-e4fcb60cba49
-	github.com/jobs-build/jobs-iroh v0.22.1
-	github.com/tmc/go-iroh v0.0.0-20260714221401-b17af420bb03
+	github.com/jobs-build/jobs-iroh v0.24.2
+	github.com/tmc/go-iroh v0.0.0-20260809024910-c57a8efa9fba
 	github.com/urfave/cli/v2 v2.27.7
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
@@ -100,5 +100,3 @@ require (
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
-
-replace github.com/tmc/go-iroh => github.com/draganm/go-iroh v0.0.0-20260728231250-783e41263e0a
