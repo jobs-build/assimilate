@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jobs-build/jobs-iroh/api"
+
 	"github.com/jobs-build/assimilate/internal/jobs"
 	"github.com/jobs-build/assimilate/internal/spec"
 )
@@ -287,8 +289,12 @@ func (s sink) State(phase, counts string) {
 	s.events <- spec.Event{Build: s.build, Kind: spec.KindInfo, Info: counts}
 }
 
-func (s sink) Log(line string) {
-	s.events <- spec.Event{Build: s.build, Kind: spec.KindLog, Line: line}
+func (s sink) Snapshot(snap api.Snapshot) {
+	s.events <- spec.Event{Build: s.build, Kind: spec.KindSnapshot, Snap: &snap}
+}
+
+func (s sink) Log(node, line string) {
+	s.events <- spec.Event{Build: s.build, Kind: spec.KindLog, Node: node, Line: line}
 }
 
 // flight tracks submitted builds whose Follow has not returned. cancelAll

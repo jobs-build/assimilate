@@ -15,11 +15,14 @@ import (
 	"github.com/jobs-build/assimilate/internal/spec"
 )
 
-// testSink records State and Log calls; safe for concurrent followers.
+// testSink records State, Snapshot and Log calls; safe for concurrent
+// followers. Logs are recorded in the classic prefixed form ("kind:key8 │
+// line" for node-tagged lines) so assertions read like terminal output.
 type testSink struct {
 	mu     sync.Mutex
 	states []string
 	logs   []string
+	snaps  []api.Snapshot
 }
 
 func (s *testSink) State(phase, counts string) {
@@ -28,10 +31,25 @@ func (s *testSink) State(phase, counts string) {
 	s.states = append(s.states, phase+"|"+counts)
 }
 
-func (s *testSink) Log(line string) {
+func (s *testSink) Snapshot(snap api.Snapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.snaps = append(s.snaps, snap)
+}
+
+func (s *testSink) Log(node, line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if node != "" {
+		line = shortNode(node) + " │ " + line
+	}
 	s.logs = append(s.logs, line)
+}
+
+func (s *testSink) snapCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.snaps)
 }
 
 func (s *testSink) logText() string {
@@ -210,7 +228,7 @@ func runningSnap(nodes ...string) api.Snapshot {
 // and the trailing-partial flush.
 func TestLinePrinterAssembly(t *testing.T) {
 	sink := &testSink{}
-	p := &linePrinter{sink: sink, prefix: "n │ "}
+	p := &linePrinter{sink: sink, node: "n"}
 
 	p.printView(api.LogView{Head: []byte("head partial"), GapSize: 42, Tail: []byte("tail\r\n")})
 	p.write([]byte("hel"))
@@ -448,6 +466,11 @@ func TestFollowLoopDone(t *testing.T) {
 	wantStates := []string{"running|1/3 built · 1 running", "done|3/3 built"}
 	if got := sink.stateList(); len(got) != 2 || got[0] != wantStates[0] || got[1] != wantStates[1] {
 		t.Fatalf("states = %q, want %q", got, wantStates)
+	}
+	// Every snapshot also arrives raw (the TUI folds it into the graph
+	// subtree), alongside — not instead of — the counts summary.
+	if sink.snapCount() != 2 {
+		t.Fatalf("snapshots delivered = %d, want 2", sink.snapCount())
 	}
 }
 

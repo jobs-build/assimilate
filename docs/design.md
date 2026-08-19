@@ -152,23 +152,40 @@ assimilate imports jobs-iroh's exported packages directly — no shelling out:
 
 ## UI
 
-On a PTY, a bubbletea TUI:
+On a PTY, a bubbletea TUI with a **two-level tree: image, then build**.
+Level one is the image list (appearance order, live phase + elapsed);
+`→`/`enter` unfolds an image into its jobs-iroh **build graph** — the same
+logical rows jobs-client's own TUI shows, folded by jobs-iroh's exported
+`tui.FoldSnapshot`/`FlattenTree` (v0.29.0) from the watch snapshots'
+`NodeSnap.Deps` edges: one row per build/import with its stage
+(`eval`/`resolve`/`pin`/`build`/`fetch`), live elapsed (server `ElapsedMs`
+plus the client-clock delta since the snapshot arrived — skew-safe), done
+durations, `(cached)` markers and failure summaries. A failed image
+auto-unfolds so the failing node is one `↓` away.
 
 ```
-┌ builds ──────────────┬ backend — building ────────────────────────────┐
-│ > backend      12s ⠋ │ recipe:3f2a91cc │ go build ./…                  │
-│   worker      done ✓ │ recipe:3f2a91cc │ …                             │
-│   frontend  queued   │                                                │
-├──────────────────────┴────────────────────────────────────────────────┤
-│ 1/3 done · ↑/↓ select · q cancel & quit                               │
+┌ builds ─────────────────────┬ backend › app — running · build 41s ────┐
+│ >▾backend           12s ⠋   │ go build ./…                            │
+│    ▾ ⠋ app build 41s        │ …                                       │
+│        ✓ fetch github (cached)                                        │
+│  ▸worker           done ✓   │                                         │
+├─────────────────────────────┴─────────────────────────────────────────┤
+│ 1/3 done · ↑/↓ select · ←/→ fold · PgUp/PgDn scroll · q cancel        │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-Left: builds in appearance order with live phase and elapsed time; ↑/↓ moves
-the selection. Right: the selected build's log tail (per-build ring buffer).
-When every build is finished the TUI exits and the GitOps phase prints plain
-progress lines. Without a PTY, everything is plain prefixed lines
-(`[backend] …`), like jobs-client's non-TTY mode.
+Right pane: for an **image row**, the combined build log (every followed
+node's lines, `kind:key8 │ `-prefixed; per-build ring buffer); for a
+**graph row**, that node's own output only (per-node rings fed by the same
+follow streams — a node whose follow never attached under the budget shows
+nothing). Log follows still attach per active node, capped per build and
+client-wide; the tree opens no extra streams. When every build is finished
+the TUI exits and the GitOps phase prints plain progress lines. Without a
+PTY, everything is plain prefixed lines (`[backend] kind:key8 │ …`), like
+jobs-client's non-TTY mode; snapshots are ignored there.
+
+The graph edges need a jobs-iroh ≥ v0.28.0 server (`NodeSnap.Deps`);
+against an older server the image rows simply never become expandable.
 
 ## GitOps push, PR, rollout
 

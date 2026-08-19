@@ -20,9 +20,13 @@ assimilate render staging            # print rendered manifests (offline — no 
 Run it from anywhere inside the monorepo; the root is found by walking up
 until a directory containing `assimilate-templates/` appears.
 
-On a terminal, `deploy` shows a TUI: builds on the left (↑/↓ to select,
-ordered by appearance in the templates), the selected build's log output on
-the right, `q` to cancel. Without a TTY (CI), plain prefixed lines.
+On a terminal, `deploy` shows a TUI with two levels — image, then build:
+the image list on the left (↑/↓ to select, ordered by appearance in the
+templates), and `→`/`enter` unfolds an image into its live jobs-iroh build
+graph (per-step state, elapsed, `(cached)`, failures — a failed image
+unfolds itself). The right pane follows the selected row's output: the
+whole build's log for an image row, that step's own output for a graph
+row. `←` folds, `q` cancels. Without a TTY (CI), plain prefixed lines.
 
 ## Project layout
 

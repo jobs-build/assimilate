@@ -13,15 +13,20 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jobs-build/jobs-iroh/api"
+	jitui "github.com/jobs-build/jobs-iroh/tui"
+	"github.com/jobs-build/jobs-iroh/wire"
+
 	"github.com/jobs-build/assimilate/internal/spec"
 )
 
 const (
-	maxLogLines = 5000 // per-build ring capacity; oldest lines drop
-	minLeftW    = 20
-	maxLeftW    = 44
-	// rowOverhead is the non-name part of a left-pane row:
-	// cursor(2) + space + elapsed(4) + space + icon(1).
+	maxLogLines  = 5000 // per-build ring capacity; oldest lines drop
+	nodeLogLines = 2000 // per-node ring capacity (one ring per output node)
+	minLeftW     = 20
+	maxLeftW     = 48
+	// rowOverhead is the non-name part of a left-pane image row:
+	// cursor(1) + expander(1) + space + elapsed(4) + space + icon(1) + pad.
 	rowOverhead = 9
 )
 
@@ -39,14 +44,45 @@ var (
 	styleSel   = lipgloss.NewStyle().Bold(true)
 )
 
-// buildRow is one build's UI state.
+// buildRow is one image build's UI state: the top-level row plus its
+// expandable jobs-iroh build-graph subtree (fed by KindSnapshot events) and
+// the per-node output rings (fed by node-tagged KindLog events).
 type buildRow struct {
 	name  string
 	state spec.BuildState
-	info  string // transient note (push progress, error summary)
-	log   *ring
+	info  string    // transient note (push progress, error summary)
+	log   *ring     // combined build output (node lines carry a node prefix)
 	start time.Time // set when the build leaves StatePending
 	end   time.Time // set on the terminal transition
+
+	// Build-graph subtree (second level: "image and then build").
+	snap     *api.Snapshot     // latest coalesced watch snapshot
+	snapAt   time.Time         // arrival clock, for elapsed extrapolation
+	graph    *jitui.BuildGraph // folded snap; nil until a graph-bearing snap
+	labels   map[string]string // log-node name → display label (pane titles)
+	nodeLogs map[string]*ring  // node name → its own output (lazy)
+	expanded bool              // image row expanded into its subtree
+	exp      map[string]bool   // per-path expansion override within it
+}
+
+// nodeRing returns (creating lazily) the ring of one node's output.
+func (r *buildRow) nodeRing(node string) *ring {
+	if r.nodeLogs == nil {
+		r.nodeLogs = map[string]*ring{}
+	}
+	rg := r.nodeLogs[node]
+	if rg == nil {
+		rg = newRing(nodeLogLines)
+		r.nodeLogs[node] = rg
+	}
+	return rg
+}
+
+// visRow is one selectable line of the two-level tree: an image row
+// (tree == nil) or one row of that image's build-graph subtree.
+type visRow struct {
+	img  int
+	tree *jitui.TreeRow // nil = the image row itself
 }
 
 // model is the TUI. Quit is gated on closedMsg — the stream must drain
@@ -55,6 +91,7 @@ type buildRow struct {
 // stream that never closes cannot wedge the terminal.
 type model struct {
 	rows     []buildRow
+	visible  []visRow // flattened two-level tree; selected indexes it
 	selected int
 
 	vp     viewport.Model
@@ -85,7 +122,7 @@ func newModel(names []string, cancel context.CancelFunc, clock func() time.Time)
 			longest = w
 		}
 	}
-	return model{
+	m := model{
 		rows:      rows,
 		vp:        viewport.New(0, 0),
 		follow:    true,
@@ -94,6 +131,66 @@ func newModel(names []string, cancel context.CancelFunc, clock func() time.Time)
 		cancel:    cancel,
 		clock:     clock,
 	}
+	m.rebuildVisible()
+	return m
+}
+
+// rebuildVisible reflattens the two-level tree: every image row, plus — for
+// expanded images with a folded graph — that image's build-graph rows.
+// Selection is preserved by identity (image, path) and clamped.
+func (m *model) rebuildVisible() {
+	var curImg, curPath = -1, ""
+	if m.selected < len(m.visible) {
+		v := m.visible[m.selected]
+		curImg = v.img
+		if v.tree != nil {
+			curPath = v.tree.Path
+		}
+	}
+	m.visible = m.visible[:0]
+	sel := 0
+	for i := range m.rows {
+		if curImg == i && curPath == "" {
+			sel = len(m.visible)
+		}
+		m.visible = append(m.visible, visRow{img: i})
+		r := &m.rows[i]
+		if !r.expanded || r.graph == nil {
+			continue
+		}
+		for _, tr := range jitui.FlattenTree(r.graph, r.exp) {
+			if curImg == i && curPath == tr.Path {
+				sel = len(m.visible)
+			}
+			m.visible = append(m.visible, visRow{img: i, tree: &tr})
+		}
+	}
+	m.selected = clampInt(sel, 0, max(0, len(m.visible)-1))
+}
+
+// selectedRing is the ring the right pane shows: the image's combined log,
+// or the selected graph row's own node output ("" ring shows empty).
+func (m *model) selectedRing() *ring {
+	if m.selected >= len(m.visible) {
+		return nil
+	}
+	v := m.visible[m.selected]
+	r := &m.rows[v.img]
+	if v.tree == nil {
+		return r.log
+	}
+	if row := m.graphRow(v); row != nil && row.LogNode != "" {
+		return r.nodeRing(row.LogNode)
+	}
+	return nil
+}
+
+// graphRow resolves a visRow's folded build-graph row (nil for image rows).
+func (m *model) graphRow(v visRow) *jitui.BuildRow {
+	if v.tree == nil || m.rows[v.img].graph == nil {
+		return nil
+	}
+	return m.rows[v.img].graph.Rows[v.tree.Node]
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -155,6 +252,12 @@ func (m model) updateKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.moveSelection(-1)
 	case "down", "j":
 		m.moveSelection(+1)
+	case "right", "l":
+		m.setExpanded(true)
+	case "left", "h":
+		m.setExpanded(false)
+	case "enter", " ", "space":
+		m.toggleExpanded()
 	case "q", "ctrl+c":
 		return m.quitRequest()
 	case "pgup", "pgdown":
@@ -164,6 +267,54 @@ func (m model) updateKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// expandable reports whether the selected row can fold: an image row with a
+// folded graph, or a graph row with children.
+func (m *model) expandable() bool {
+	if m.selected >= len(m.visible) {
+		return false
+	}
+	v := m.visible[m.selected]
+	if v.tree == nil {
+		return m.rows[v.img].graph != nil
+	}
+	return v.tree.HasKids
+}
+
+// setExpanded records the selected row's expansion and reflattens.
+func (m *model) setExpanded(want bool) {
+	if !m.expandable() {
+		return
+	}
+	v := m.visible[m.selected]
+	r := &m.rows[v.img]
+	if v.tree == nil {
+		if r.expanded == want {
+			return
+		}
+		r.expanded = want
+	} else {
+		if r.exp == nil {
+			r.exp = map[string]bool{}
+		}
+		r.exp[v.tree.Path] = want
+	}
+	m.rebuildVisible()
+	m.follow = true
+	m.layout() // expansion changes leftWidth; resize the viewport with it
+}
+
+func (m *model) toggleExpanded() {
+	if !m.expandable() {
+		return
+	}
+	v := m.visible[m.selected]
+	if v.tree == nil {
+		m.setExpanded(!m.rows[v.img].expanded)
+	} else {
+		m.setExpanded(!v.tree.Expanded)
+	}
 }
 
 // quitRequest handles q/ctrl-c/SIGINT: the first request fires cancel
@@ -190,12 +341,12 @@ func (m *model) requestCancel() {
 	}
 }
 
-// moveSelection selects a neighbouring build and re-pins its log tail.
+// moveSelection selects a neighbouring visible row and re-pins its log tail.
 func (m *model) moveSelection(delta int) {
-	if len(m.rows) == 0 {
+	if len(m.visible) == 0 {
 		return
 	}
-	sel := clampInt(m.selected+delta, 0, len(m.rows)-1)
+	sel := clampInt(m.selected+delta, 0, len(m.visible)-1)
 	if sel == m.selected {
 		return
 	}
@@ -242,6 +393,12 @@ func (m model) apply(ev spec.Event) (model, tea.Cmd) {
 			}
 			m.flushLog() // the last tick may never come; show the final tail now
 		}
+		if ev.State == spec.StateFailed && row.graph != nil && !row.expanded {
+			// A failed image unfolds so the failing node is one ↓ away.
+			row.expanded = true
+			m.rebuildVisible()
+			m.layout()
+		}
 		if !m.ticking && m.anyActive() {
 			m.ticking = true
 			cmds = append(cmds, tickCmd())
@@ -250,9 +407,34 @@ func (m model) apply(ev spec.Event) (model, tea.Cmd) {
 			m.spinning = true
 			cmds = append(cmds, m.spin.Tick)
 		}
+	case spec.KindSnapshot:
+		if ev.Snap == nil {
+			return m, nil
+		}
+		row.snap, row.snapAt = ev.Snap, m.clock()
+		// An old server sends no graph edges: the image row simply never
+		// becomes expandable (SnapshotHasGraph keeps the last usable fold).
+		if jitui.SnapshotHasGraph(*ev.Snap) {
+			row.graph = jitui.FoldSnapshot(*ev.Snap)
+			row.labels = graphLabels(row.graph)
+		}
+		if row.expanded {
+			m.rebuildVisible()
+			// The selected node's log target can change with the fold
+			// (queued → running switches LogNode) — re-aim the viewport.
+			if m.selected < len(m.visible) && m.visible[m.selected].img == ev.Build && m.visible[m.selected].tree != nil {
+				m.refreshLog()
+			}
+		}
 	case spec.KindLog:
-		row.log.push(sanitizeLine(ev.Line))
-		if ev.Build == m.selected {
+		line := sanitizeLine(ev.Line)
+		combined := line
+		if ev.Node != "" {
+			row.nodeRing(ev.Node).push(line)
+			combined = shortNodeName(ev.Node) + " │ " + line
+		}
+		row.log.push(combined)
+		if m.eventTouchesSelection(ev) {
 			// Coalesce: mark dirty and let the pending tick rebuild, so a
 			// verbose build costs O(ring) per tick, not per line.
 			m.logDirty = true
@@ -264,6 +446,49 @@ func (m model) apply(ev spec.Event) (model, tea.Cmd) {
 		row.info = ev.Info
 	}
 	return m, tea.Batch(cmds...)
+}
+
+// eventTouchesSelection reports whether a log event landed in the ring the
+// right pane currently shows.
+func (m *model) eventTouchesSelection(ev spec.Event) bool {
+	if m.selected >= len(m.visible) {
+		return false
+	}
+	v := m.visible[m.selected]
+	if v.img != ev.Build {
+		return false
+	}
+	if v.tree == nil {
+		return true // combined ring: every line of this build lands there
+	}
+	gr := m.graphRow(v)
+	return gr != nil && gr.LogNode != "" && gr.LogNode == ev.Node
+}
+
+// graphLabels indexes a fold's display labels by log node, for pane titles
+// and node-line prefixes.
+func graphLabels(g *jitui.BuildGraph) map[string]string {
+	ls := map[string]string{}
+	for _, r := range g.Rows {
+		if r.LogNode == "" {
+			continue
+		}
+		l := r.Label
+		if l == "" {
+			l = shortNodeName(r.Node)
+		}
+		ls[r.LogNode] = l
+	}
+	return ls
+}
+
+// shortNodeName renders a node name as kind:key8 (follow.go's prefix form).
+func shortNodeName(name string) string {
+	kind, k, err := wire.ParseNodeName(name)
+	if err != nil {
+		return name
+	}
+	return kind + ":" + k.String()[:8]
 }
 
 // anyActive: a build is running (left pending, not settled) — the elapsed
@@ -292,13 +517,29 @@ func tickCmd() tea.Cmd {
 
 // --- geometry ---
 
-// leftWidth caps the fixed left pane to half of a narrow terminal.
+// leftWidth caps the fixed left pane to half of a narrow terminal. An
+// expanded build-graph subtree needs room for its indented rows, so any
+// open fold widens the pane toward 2/5 of the screen.
 func (m model) leftWidth() int {
 	w := m.baseLeftW
+	if m.anyExpanded() {
+		if t := clampInt(m.width*2/5, minLeftW, maxLeftW); t > w {
+			w = t
+		}
+	}
 	if m.width > 0 && w > m.width/2 {
 		w = max(1, m.width/2)
 	}
 	return w
+}
+
+func (m model) anyExpanded() bool {
+	for i := range m.rows {
+		if m.rows[i].expanded && m.rows[i].graph != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // layout recomputes the panes after a resize.
@@ -308,17 +549,20 @@ func (m *model) layout() {
 	m.refreshLog()
 }
 
-// refreshLog reloads the viewport with the selected build's ring buffer,
-// hard-truncating lines to the pane width and re-pinning the tail when
-// following. O(ring) — appended lines only mark logDirty and rely on
-// flushLog at tick cadence.
+// refreshLog reloads the viewport with the selected row's ring buffer (the
+// image's combined log, or one node's own output), hard-truncating lines to
+// the pane width and re-pinning the tail when following. O(ring) — appended
+// lines only mark logDirty and rely on flushLog at tick cadence.
 func (m *model) refreshLog() {
 	m.logDirty = false
-	if len(m.rows) == 0 || m.vp.Width <= 0 {
+	if len(m.visible) == 0 || m.vp.Width <= 0 {
 		return
 	}
 	m.refreshes++
-	lines := m.rows[m.selected].log.lines()
+	var lines []string
+	if rg := m.selectedRing(); rg != nil {
+		lines = rg.lines()
+	}
 	for i, l := range lines {
 		lines[i] = truncLine(l, m.vp.Width)
 	}
@@ -401,16 +645,16 @@ func (m model) View() string {
 	return b.String()
 }
 
-// leftLines renders the build list, windowed around the selection when it
-// outgrows the pane.
+// leftLines renders the two-level tree, windowed around the selection when
+// it outgrows the pane.
 func (m model) leftLines(w, h int) []string {
 	top := 0
-	if len(m.rows) > h {
-		top = clampInt(m.selected-h/2, 0, len(m.rows)-h)
+	if len(m.visible) > h {
+		top = clampInt(m.selected-h/2, 0, len(m.visible)-h)
 	}
 	lines := make([]string, h)
 	for i := range lines {
-		if j := top + i; j < len(m.rows) {
+		if j := top + i; j < len(m.visible) {
 			lines[i] = m.rowLine(j, w)
 		} else {
 			lines[i] = strings.Repeat(" ", w)
@@ -419,13 +663,27 @@ func (m model) leftLines(w, h int) []string {
 	return lines
 }
 
-// rowLine is one left-pane row: '<cursor> <name> <elapsed> <icon>', the
-// Info note dim in the spare name space; always exactly w cells wide.
+// rowLine is one left-pane line: an image row
+// ('<cursor><expander> <name> <elapsed> <icon>', the Info note dim in the
+// spare name space) or one of its build-graph rows, indented; always
+// exactly w cells wide.
 func (m model) rowLine(i, w int) string {
-	r := m.rows[i]
-	cursor := "  "
+	v := m.visible[i]
+	if v.tree != nil {
+		return m.nodeLine(i, v, w)
+	}
+	r := m.rows[v.img]
+	cursor := " "
 	if i == m.selected {
-		cursor = "> "
+		cursor = ">"
+	}
+	expander := " "
+	if r.graph != nil {
+		if r.expanded {
+			expander = "▾"
+		} else {
+			expander = "▸"
+		}
 	}
 	nameW := max(1, w-rowOverhead)
 	field := truncLine(r.name, nameW)
@@ -436,19 +694,130 @@ func (m model) rowLine(i, w int) string {
 		field += " " + styleDim.Render(truncLine(r.info, spare-1))
 	}
 	fill := max(0, nameW-lipgloss.Width(field))
-	line := cursor + field + strings.Repeat(" ", fill) +
+	line := cursor + expander + field + strings.Repeat(" ", fill) +
 		fmt.Sprintf(" %4s ", fmtElapsed(m.elapsed(r))) + m.icon(r.state)
 	return truncLine(line, w)
 }
 
-// rightLines is the selected build's title over its log viewport.
+// nodeLine renders one build-graph row: indent under its image, expander,
+// phase glyph, label, then the stage/elapsed/error detail dim.
+func (m model) nodeLine(i int, v visRow, w int) string {
+	tr := v.tree
+	row := m.graphRow(v)
+	if row == nil {
+		return strings.Repeat(" ", w)
+	}
+	cursor := " "
+	if i == m.selected {
+		cursor = ">"
+	}
+	expander := " "
+	if tr.HasKids {
+		if tr.Expanded {
+			expander = "▾"
+		} else {
+			expander = "▸"
+		}
+	}
+	label := row.Label
+	if label == "" {
+		label = shortNodeName(row.Node)
+	}
+	if i == m.selected {
+		label = styleSel.Render(label)
+	}
+	line := cursor + strings.Repeat("  ", tr.Depth+1) + expander + " " +
+		m.nodeIcon(row) + " " + label
+	if detail := m.nodeDetail(&m.rows[v.img], row); detail != "" {
+		line += " " + styleDim.Render(detail)
+	}
+	if pad := w - lipgloss.Width(line); pad > 0 {
+		line += strings.Repeat(" ", pad)
+	}
+	return truncLine(line, w)
+}
+
+// nodeDetail is a graph row's compact status suffix. Running elapsed is the
+// server-computed ElapsedMs extrapolated by the client-clock delta since
+// the snapshot arrived (skew-safe, keeps ticking between pushes).
+func (m model) nodeDetail(img *buildRow, row *jitui.BuildRow) string {
+	elapsed := time.Duration(row.ElapsedMs) * time.Millisecond
+	switch row.Phase {
+	case wire.PhaseRunning, wire.PhasePublishing:
+		if !img.snapAt.IsZero() {
+			elapsed += m.clock().Sub(img.snapAt)
+		}
+		return row.Stage + " " + fmtElapsed(elapsed)
+	case wire.PhaseQueued:
+		return row.Stage + " queued"
+	case wire.PhaseDone:
+		if row.Cached {
+			return "(cached)"
+		}
+		if row.ElapsedMs > 0 {
+			return fmtElapsed(elapsed)
+		}
+		return ""
+	case wire.PhaseFailed:
+		d := row.Stage
+		if row.Err != "" {
+			d += ": " + row.Err
+		}
+		return d
+	case wire.PhaseUpstream:
+		return "upstream failed"
+	case wire.PhaseCancelled:
+		return "cancelled"
+	}
+	return ""
+}
+
+// nodeIcon is a graph row's one-cell state marker (image rows use icon).
+func (m model) nodeIcon(row *jitui.BuildRow) string {
+	switch row.Phase {
+	case wire.PhaseRunning, wire.PhasePublishing:
+		return m.spin.View()
+	case wire.PhaseDone:
+		if row.Cached {
+			return styleDim.Render("✓")
+		}
+		return styleGreen.Render("✓")
+	case wire.PhaseFailed, wire.PhaseUpstream:
+		return styleRed.Render("✗")
+	case wire.PhaseQueued:
+		return "◦"
+	case wire.PhaseCancelled:
+		return styleDim.Render("∅")
+	}
+	return styleDim.Render("·")
+}
+
+// rightLines is the selected row's title over its log viewport: the image's
+// name+state for image rows, the node's label+phase (and "no output" when
+// the node has none) for graph rows.
 func (m model) rightLines(w, h int) []string {
 	lines := make([]string, h)
-	if len(m.rows) > 0 {
-		r := m.rows[m.selected]
-		title := " " + r.name + " — " + string(r.state)
-		if r.info != "" {
-			title += " · " + r.info
+	if m.selected < len(m.visible) {
+		v := m.visible[m.selected]
+		r := m.rows[v.img]
+		var title string
+		if v.tree == nil {
+			title = " " + r.name + " — " + string(r.state)
+			if r.info != "" {
+				title += " · " + r.info
+			}
+		} else if row := m.graphRow(v); row != nil {
+			label := row.Label
+			if label == "" {
+				label = shortNodeName(row.Node)
+			}
+			title = " " + r.name + " › " + label + " — " + row.Phase
+			if d := m.nodeDetail(&m.rows[v.img], row); d != "" {
+				title += " · " + d
+			}
+			if row.LogNode == "" {
+				title += " · (no output for this row)"
+			}
 		}
 		lines[0] = truncLine(title, w)
 	}
@@ -474,7 +843,7 @@ func (m model) footer() string {
 		line = styleDim.Render(base+" · ") + styleRed.Render("cancelling…") +
 			styleDim.Render(" (q again to force quit)")
 	} else {
-		line = styleDim.Render(base + " · ↑/↓ select · PgUp/PgDn scroll · q cancel")
+		line = styleDim.Render(base + " · ↑/↓ select · ←/→ fold · PgUp/PgDn scroll · q cancel")
 	}
 	if m.globalNote != "" {
 		note := styleDim.Render(truncLine(m.globalNote, m.width/2))

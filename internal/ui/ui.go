@@ -100,7 +100,13 @@ func RunPlain(w io.Writer, names []string, events <-chan spec.Event) {
 	for ev := range events {
 		switch ev.Kind {
 		case spec.KindLog:
-			fmt.Fprintln(w, prefix(ev, ev.Line))
+			line := ev.Line
+			if ev.Node != "" {
+				// Node-tagged lines arrive raw; re-add follow.go's classic
+				// "kind:key8 │ " prefix so interleaved nodes stay readable.
+				line = shortNodeName(ev.Node) + " │ " + line
+			}
+			fmt.Fprintln(w, prefix(ev, line))
 		case spec.KindState:
 			line := "▸ " + string(ev.State)
 			if ev.Info != "" {

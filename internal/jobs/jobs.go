@@ -54,9 +54,15 @@ type Sink interface {
 	// State reports a coalesced snapshot: the request phase and a short
 	// human counts summary (e.g. "3/7 built · 1 running").
 	State(phase string, counts string)
+	// Snapshot delivers the raw coalesced watch snapshot (incl. the graph
+	// edges NodeSnap.Deps and Cached) alongside State — the TUI folds it
+	// into the build's expandable subtree. Plain consumers may ignore it.
+	Snapshot(snap api.Snapshot)
 	// Log delivers one reassembled output line (chunks split lines at
 	// arbitrary byte boundaries; partial lines are buffered until newline).
-	Log(line string)
+	// node is the graph node the line belongs to ("" = build-level note);
+	// lines carry NO node prefix — consumers add one where views mix nodes.
+	Log(node, line string)
 }
 
 // Source identifies an ingested source tree. The zero value is usable by

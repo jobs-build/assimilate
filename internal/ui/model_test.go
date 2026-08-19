@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -9,6 +10,9 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/jobs-build/jobs-iroh/api"
+	"github.com/jobs-build/jobs-iroh/wire"
 
 	"github.com/jobs-build/assimilate/internal/spec"
 )
@@ -693,3 +697,155 @@ func TestLogFlushOnTerminalAndClose(t *testing.T) {
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// --- two-level tree (image → build graph) ---
+
+// nn mints a parseable node name: kind_<64-hex>.
+func nn(kind string, i int) string { return kind + "_" + fmt.Sprintf("%064x", i) }
+
+// graphSnap is a one-build closure: buildvalue "app" whose chain runs a
+// buildrun, with a cached import child under the buildfrom.
+func graphSnap() *api.Snapshot {
+	bv, bf := nn("buildvalue", 1), nn("buildfrom", 1)
+	br, imp := nn("buildrun", 2), nn("import", 3)
+	return &api.Snapshot{
+		Phase: "running",
+		Nodes: []api.NodeSnap{
+			{Node: bv, Label: "app", Phase: wire.PhaseWaiting, Deps: []string{bf, br}},
+			{Node: bf, Phase: wire.PhaseDone, Deps: []string{imp}},
+			{Node: br, Phase: wire.PhaseRunning, ElapsedMs: 41000, Runner: "r-a"},
+			{Node: imp, Label: "fetch github", Phase: wire.PhaseDone, Cached: true},
+		},
+	}
+}
+
+func snapEv(build int, snap *api.Snapshot) tea.Msg {
+	return eventMsg{spec.Event{Build: build, Kind: spec.KindSnapshot, Snap: snap}}
+}
+
+func nodeLogEv(build int, node, line string) tea.Msg {
+	return eventMsg{spec.Event{Build: build, Kind: spec.KindLog, Node: node, Line: line}}
+}
+
+// TestTreeExpandCollapse: a snapshot makes the image expandable; expanding
+// reveals the folded build-graph rows; collapsing hides them again.
+func TestTreeExpandCollapse(t *testing.T) {
+	m := newTestModel(t, []string{"img-a", "img-b"}, nil, nil)
+	m = drive(m, sizeMsg(100, 24), stateEv(0, spec.StateBuilding), snapEv(0, graphSnap()))
+	if len(m.visible) != 2 {
+		t.Fatalf("visible before expand = %d rows, want the 2 image rows", len(m.visible))
+	}
+	if !m.expandable() {
+		t.Fatal("image with a graph-bearing snapshot must be expandable")
+	}
+
+	m = drive(m, key("right"))
+	// image-a + its root buildvalue + import child (cached-done default-
+	// collapsed children are still VISIBLE as rows, just not expanded
+	// further) + image-b.
+	if len(m.visible) != 4 {
+		t.Fatalf("visible after expand = %d rows (%+v), want 4", len(m.visible), m.visible)
+	}
+	if m.visible[1].tree == nil || m.visible[2].tree == nil {
+		t.Fatalf("rows 1-2 must be graph rows: %+v", m.visible)
+	}
+	v := m.View()
+	for _, want := range []string{"app", "build 41s", "fetch github", "(cached)"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("expanded view missing %q:\n%s", want, v)
+		}
+	}
+
+	m = drive(m, key("left"))
+	if len(m.visible) != 2 {
+		t.Fatalf("visible after collapse = %d rows, want 2", len(m.visible))
+	}
+}
+
+// TestNodeLogRouting: node-tagged lines land in the node's own ring (raw)
+// AND the image's combined ring (prefixed); selecting the node row shows
+// only its output.
+func TestNodeLogRouting(t *testing.T) {
+	m := newTestModel(t, []string{"img"}, nil, nil)
+	br := nn("buildrun", 2)
+	m = drive(m, sizeMsg(100, 24), stateEv(0, spec.StateBuilding), snapEv(0, graphSnap()),
+		nodeLogEv(0, br, "compiling world"),
+		logEv(0, "build-level note"))
+
+	// Image row selected: the combined ring shows both, node line prefixed.
+	m.flushLog()
+	v := m.View()
+	if !strings.Contains(v, "buildrun:0000000000000002"[:16]+" │ compiling world") && !strings.Contains(v, " │ compiling world") {
+		t.Fatalf("combined view missing prefixed node line:\n%s", v)
+	}
+	if !strings.Contains(v, "build-level note") {
+		t.Fatalf("combined view missing the build-level line:\n%s", v)
+	}
+
+	// Select the root buildvalue row (its LogNode is the running buildrun).
+	m = drive(m, key("right"), key("down"))
+	if m.visible[m.selected].tree == nil {
+		t.Fatalf("selection is not a graph row: %+v", m.visible[m.selected])
+	}
+	v = m.View()
+	if !strings.Contains(v, "compiling world") {
+		t.Fatalf("node pane missing its output:\n%s", v)
+	}
+	if strings.Contains(v, "build-level note") {
+		t.Fatalf("node pane leaked the combined ring:\n%s", v)
+	}
+	if !strings.Contains(v, "img › app") {
+		t.Fatalf("node pane title missing 'img › app':\n%s", v)
+	}
+}
+
+// TestFailureAutoExpands: a terminal failure unfolds the image so the
+// failing node is visible.
+func TestFailureAutoExpands(t *testing.T) {
+	m := newTestModel(t, []string{"img"}, nil, nil)
+	snap := graphSnap()
+	snap.Nodes[2].Phase, snap.Nodes[2].ErrSummary = wire.PhaseFailed, "boom"
+	snap.Nodes[0].Phase = wire.PhaseUpstream
+	m = drive(m, sizeMsg(100, 24), stateEv(0, spec.StateBuilding), snapEv(0, snap),
+		eventMsg{spec.Event{Build: 0, Kind: spec.KindState, State: spec.StateFailed, Info: "build failed"}})
+	if !m.rows[0].expanded {
+		t.Fatal("failed image did not auto-expand")
+	}
+	if v := m.View(); !strings.Contains(v, "build: boom") {
+		t.Fatalf("failed node detail missing:\n%s", v)
+	}
+}
+
+// TestSelectionSurvivesSnapshotRefold: a fresh snapshot for an expanded
+// image keeps the selection on the same path.
+func TestSelectionSurvivesSnapshotRefold(t *testing.T) {
+	m := newTestModel(t, []string{"img"}, nil, nil)
+	m = drive(m, sizeMsg(100, 24), stateEv(0, spec.StateBuilding), snapEv(0, graphSnap()),
+		key("right"), key("down"), key("down"))
+	wantPath := m.visible[m.selected].tree.Path
+
+	next := graphSnap()
+	next.Nodes[2].ElapsedMs = 99000
+	m = drive(m, snapEv(0, next))
+	if got := m.visible[m.selected].tree; got == nil || got.Path != wantPath {
+		t.Fatalf("selection moved after refold: %+v, want path %q", got, wantPath)
+	}
+}
+
+// TestOldServerNotExpandable: a multi-node snapshot without Deps (old
+// server) never makes the image expandable.
+func TestOldServerNotExpandable(t *testing.T) {
+	m := newTestModel(t, []string{"img"}, nil, nil)
+	snap := &api.Snapshot{Phase: "running", Nodes: []api.NodeSnap{
+		{Node: nn("buildvalue", 1), Phase: wire.PhaseWaiting},
+		{Node: nn("buildrun", 2), Phase: wire.PhaseRunning},
+	}}
+	m = drive(m, sizeMsg(100, 24), stateEv(0, spec.StateBuilding), snapEv(0, snap))
+	if m.expandable() {
+		t.Fatal("old-server snapshot (no deps) must not be expandable")
+	}
+	m = drive(m, key("right"))
+	if len(m.visible) != 1 {
+		t.Fatalf("visible = %d rows, want just the image row", len(m.visible))
+	}
+}

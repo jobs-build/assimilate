@@ -54,6 +54,7 @@ func followLoop(ctx context.Context, next func() (api.Snapshot, error), lo logOp
 			return "", fmt.Errorf("watch stream: %w", err)
 		}
 		sink.State(snap.Phase, countsSummary(snap.Counts))
+		sink.Snapshot(snap)
 		fs.sync(snap)
 		if !snap.Terminal {
 			continue
@@ -87,30 +88,30 @@ func countsSummary(c wire.Counts) string {
 }
 
 // emitFailureLogs delivers the failure story into the sink: per hard-failed
-// node (not the derived failed-upstream ones) a header with the ErrSummary,
-// then the stored head/gap/tail view unless the node's output was already
-// streamed live. Best-effort: fetch problems are noted and swallowed — the
-// build verdict is already decided.
+// node (not the derived failed-upstream ones) a build-level header with the
+// ErrSummary, then the stored head/gap/tail view (node-tagged) unless the
+// node's output was already streamed live. Best-effort: fetch problems are
+// noted and swallowed — the build verdict is already decided.
 func emitFailureLogs(ctx context.Context, lf logFetcher, snap api.Snapshot, sink Sink, streamed map[string]bool) {
 	for _, n := range snap.Nodes {
 		if n.Phase != wire.PhaseFailed {
 			continue
 		}
-		sink.Log(fmt.Sprintf("--- %s failed (gen %d): %s", shortNode(n.Node), n.Gen, n.ErrSummary))
+		sink.Log("", fmt.Sprintf("--- %s failed (gen %d): %s", shortNode(n.Node), n.Gen, n.ErrSummary))
 		if streamed[n.Node] {
-			sink.Log("(output streamed above)")
+			sink.Log("", "(output streamed above)")
 			continue
 		}
 		view, err := lf.fetchLogs(ctx, n.Node)
 		if err != nil {
-			sink.Log(fmt.Sprintf("(logs unavailable: %v)", err))
+			sink.Log(n.Node, fmt.Sprintf("(logs unavailable: %v)", err))
 			continue
 		}
 		if len(view.Head) == 0 && len(view.Tail) == 0 {
-			sink.Log("(no captured output)")
+			sink.Log(n.Node, "(no captured output)")
 			continue
 		}
-		p := &linePrinter{sink: sink, prefix: shortNode(n.Node) + " │ "}
+		p := &linePrinter{sink: sink, node: n.Node}
 		p.printView(view)
 		p.flush()
 	}
@@ -134,12 +135,13 @@ func isActivePhase(phase string) bool {
 	return false
 }
 
-// linePrinter assembles one node's output bytes into prefixed sink lines.
-// Chunks cut lines anywhere, so a partial line waits in pending until its
-// newline arrives or flush is called.
+// linePrinter assembles one node's output bytes into node-tagged sink lines
+// (no prefix — consumers add one where views mix nodes). Chunks cut lines
+// anywhere, so a partial line waits in pending until its newline arrives or
+// flush is called.
 type linePrinter struct {
 	sink    Sink
-	prefix  string
+	node    string
 	pending []byte
 }
 
@@ -164,7 +166,7 @@ func (p *linePrinter) flush() {
 }
 
 func (p *linePrinter) println(line []byte) {
-	p.sink.Log(p.prefix + string(bytes.TrimSuffix(line, []byte("\r"))))
+	p.sink.Log(p.node, string(bytes.TrimSuffix(line, []byte("\r"))))
 }
 
 // printView renders a stored head/gap/tail view through the printer.
@@ -172,7 +174,7 @@ func (p *linePrinter) printView(view api.LogView) {
 	p.write(view.Head)
 	if view.GapSize > 0 {
 		p.flush()
-		p.sink.Log(p.prefix + fmt.Sprintf("... [%d bytes omitted] ...", view.GapSize))
+		p.sink.Log(p.node, fmt.Sprintf("... [%d bytes omitted] ...", view.GapSize))
 	}
 	p.write(view.Tail)
 }
@@ -279,7 +281,7 @@ func (f *followSet) noteCapLocked() {
 		return
 	}
 	f.capNoted = true
-	f.sink.Log("[logs] follow cap reached — more steps are active, not all output is streamed")
+	f.sink.Log("", "[logs] follow cap reached — more steps are active, not all output is streamed")
 }
 
 func (f *followSet) followLocked(node string) {
@@ -308,17 +310,16 @@ func (f *followSet) markStreamed(node string) {
 // for a newer gen means the attempt was retried: flush, mark, continue with
 // the new attempt; older-gen chunks are stale and dropped.
 func (f *followSet) runFollower(ctx context.Context, node string) {
-	prefix := shortNode(node) + " │ "
 	view, next, done, err := f.open.openLogs(ctx, node, true)
 	if err != nil {
 		if ctx.Err() == nil {
-			f.sink.Log(prefix + fmt.Sprintf("(logs unavailable: %v)", err))
+			f.sink.Log(node, fmt.Sprintf("(logs unavailable: %v)", err))
 		}
 		return
 	}
 	defer done()
 	f.markStreamed(node)
-	p := &linePrinter{sink: f.sink, prefix: prefix}
+	p := &linePrinter{sink: f.sink, node: node}
 	defer p.flush()
 	p.printView(view)
 	gen := view.Gen
@@ -333,7 +334,7 @@ func (f *followSet) runFollower(ctx context.Context, node string) {
 		if chunk.Gen > gen {
 			if gen > 0 {
 				p.flush()
-				f.sink.Log(prefix + fmt.Sprintf("(retried — attempt gen %d)", chunk.Gen))
+				f.sink.Log(node, fmt.Sprintf("(retried — attempt gen %d)", chunk.Gen))
 			}
 			gen = chunk.Gen
 		}

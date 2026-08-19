@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/jobs-build/jobs-iroh/api"
 )
 
 // BuildSpec is one jobs-build image object extracted from a template.
@@ -75,11 +77,17 @@ const (
 	// KindState: Build entered State; Info optionally carries detail
 	// (an error summary on failure).
 	KindState EventKind = iota
-	// KindLog: Line is one log line of Build's output.
+	// KindLog: Line is one log line of Build's output. Node ("" = the
+	// build itself) names the graph node the line belongs to, so the TUI
+	// can bucket output per node while the combined view prefixes it.
 	KindLog
 	// KindInfo: Info is a transient progress note (push progress, counts);
 	// shown in the build's status column, not appended to the log.
 	KindInfo
+	// KindSnapshot: Snap is Build's latest coalesced watch snapshot (the
+	// raw jobs-iroh closure incl. NodeSnap.Deps/Cached) — the TUI folds it
+	// into the image's build-graph subtree. Plain mode ignores it.
+	KindSnapshot
 )
 
 // Event is one UI-consumable happening. Build indexes the ordered build
@@ -90,6 +98,8 @@ type Event struct {
 	State BuildState
 	Line  string
 	Info  string
+	Node  string        // KindLog: source node name ("" = build-level)
+	Snap  *api.Snapshot // KindSnapshot only
 }
 
 // Config is one environment's assimilate.yaml.

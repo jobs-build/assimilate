@@ -95,7 +95,7 @@ func (f *fake) Follow(ctx context.Context, h jobs.Handle, sink jobs.Sink) (spec.
 		return fn(ctx, sink)
 	}
 	sink.State("building", "1/1 running")
-	sink.Log("hello")
+	sink.Log("", "hello")
 	sink.State("done", "1/1 built") // terminal phase — must NOT surface as KindInfo
 	return spec.StateDone, nil
 }
