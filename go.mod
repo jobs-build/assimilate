@@ -11,8 +11,8 @@ require (
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/google/go-github/v73 v73.0.0
 	github.com/jobs-build/amber-store-core v0.0.0-20260727080459-e4fcb60cba49
-	github.com/jobs-build/jobs-iroh v0.24.2
-	github.com/tmc/go-iroh v0.0.0-20260809024910-c57a8efa9fba
+	github.com/jobs-build/jobs-iroh v0.27.0
+	github.com/tmc/go-iroh v0.0.0-20260815195718-8aca5f0f793e
 	github.com/urfave/cli/v2 v2.27.7
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0

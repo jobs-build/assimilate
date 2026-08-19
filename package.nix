@@ -2,11 +2,11 @@
 
 buildGoModule {
   pname = "assimilate";
-  version = "0.2.6";
+  version = "0.2.7";
 
   src = lib.cleanSource ./.;
 
-  vendorHash = "sha256-4qYCm+5ibUtZM8UaO201uPGFtjzK9tmC2ZeRrSVYFb0=";
+  vendorHash = "sha256-AwBGT+1XZ3IVF7I7cjqfsIFlLK6UdedqMkGy12Dyrbg=";
 
   subPackages = [ "cmd/assimilate" ];
 
