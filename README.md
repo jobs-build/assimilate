@@ -97,7 +97,7 @@ logged). Files assimilate no longer renders are never pruned.
 
 ```yaml
 git:
-  github:                            # the key selects the provider
+  github:                            # the key selects the provider (github or forgejo)
     repo: my-org/gitops
     path: clusters/staging           # directory within the repo
     branch: main                     # optional; base branch (default: repo default)
@@ -108,13 +108,24 @@ argocd:                              # optional; application URLs as copied from
   - url: https://argocd.example.com/applications/argocd/my-app
 ```
 
+A Forgejo GitOps repo takes the same keys plus the instance base URL:
+
+```yaml
+git:
+  forgejo:
+    url: https://git.example.com     # instance the API and git remote live on
+    repo: my-org/gitops
+    path: clusters/staging
+```
+
 ## Credentials (environment variables only)
 
 | Variable | Used for |
 |---|---|
 | `JOBS_SERVER` | jobs-iroh server endpoint ID |
 | `JOBS_SERVER_ADDR` | optional direct `host:port` (skips discovery; comma-separable) |
-| `GITHUB_TOKEN` / `GH_TOKEN` | GitOps repo push + PR create/merge; falls back to `gh auth token` when unset |
+| `GITHUB_TOKEN` / `GH_TOKEN` | GitOps repo push + PR create/merge (github); falls back to `gh auth token` when unset |
+| `FORGEJO_TOKEN` | GitOps repo push + PR create/merge (forgejo); needs read/write on repository, pull requests |
 | `ARGOCD_AUTH_TOKEN` / `ARGOCD_TOKEN` | ArgoCD API (`--rollout`) |
 | `ARGOCD_INSECURE=true` | skip TLS verification towards ArgoCD |
 | `ASSIMILATE_DATA_DIR` | local store dir (default `~/.local/share/assimilate`) |

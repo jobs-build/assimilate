@@ -151,7 +151,7 @@ func deploy(c *cli.Context) error {
 	if cfg.Git.Type == "" {
 		return errors.New("no git repo configured in assimilate.yaml")
 	}
-	ghToken, err := githubToken(c.Context)
+	gitTok, err := gitToken(c.Context, cfg.Git)
 	if err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func deploy(c *cli.Context) error {
 	}
 
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
-	res, err := gitops.Publish(ctx, cfg.Git, ghToken, gitops.Change{
+	res, err := gitops.Publish(ctx, cfg.Git, gitTok, gitops.Change{
 		Env:     env,
 		Message: commitMessage(env, results),
 		Files:   files,
@@ -322,6 +322,17 @@ var ghAuthToken = func(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// gitToken resolves the credential for the configured GitOps provider.
+func gitToken(ctx context.Context, cfg spec.GitConfig) (string, error) {
+	if cfg.Type == "forgejo" {
+		if t := os.Getenv("FORGEJO_TOKEN"); t != "" {
+			return t, nil
+		}
+		return "", errors.New("no Forgejo credential: set FORGEJO_TOKEN")
+	}
+	return githubToken(ctx)
 }
 
 // githubToken resolves the GitHub credential: the environment first, then the

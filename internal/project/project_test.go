@@ -251,6 +251,60 @@ argocd:
 			wantErr: "gitlab",
 		},
 		{
+			name: "forgejo full",
+			yaml: `git:
+  forgejo:
+    url: https://git.example.com
+    repo: numtide/gitops
+    path: manifests/staging
+    branch: main
+`,
+			want: spec.Config{
+				Git:      spec.GitConfig{Type: "forgejo", URL: "https://git.example.com", Repo: "numtide/gitops", Path: "manifests/staging", Branch: "main"},
+				Registry: "localhost:5000",
+			},
+		},
+		{
+			name: "forgejo url trailing slash trimmed",
+			yaml: "git:\n  forgejo:\n    url: https://git.example.com/\n    repo: a/b\n",
+			want: spec.Config{Git: spec.GitConfig{Type: "forgejo", URL: "https://git.example.com", Repo: "a/b"}, Registry: "localhost:5000"},
+		},
+		{
+			name:    "forgejo url missing",
+			yaml:    "git:\n  forgejo:\n    repo: a/b\n",
+			wantErr: "git.forgejo.url: required",
+		},
+		{
+			name:    "forgejo url not http",
+			yaml:    "git:\n  forgejo:\n    url: ssh://forgejo@git.example.com\n    repo: a/b\n",
+			wantErr: "git.forgejo.url",
+		},
+		{
+			name:    "forgejo url no host",
+			yaml:    "git:\n  forgejo:\n    url: https://\n    repo: a/b\n",
+			wantErr: "git.forgejo.url",
+		},
+		{
+			name:    "forgejo repo malformed",
+			yaml:    "git:\n  forgejo:\n    url: https://git.example.com\n    repo: gitops\n",
+			wantErr: "owner/name",
+		},
+		{
+			name:    "forgejo path escapes root",
+			yaml:    "git:\n  forgejo:\n    url: https://git.example.com\n    repo: a/b\n    path: ../x\n",
+			wantErr: "escapes the repository root",
+		},
+		{
+			name:    "github and forgejo both set",
+			yaml:    "git:\n  github:\n    repo: a/b\n  forgejo:\n    url: https://git.example.com\n    repo: a/b\n",
+			wantErr: "exactly one provider",
+		},
+		{
+			name:    "unknown forgejo key",
+			yaml:    "git:\n  forgejo:\n    url: https://git.example.com\n    repo: a/b\n    remote: origin\n",
+			wantErr: "remote",
+		},
+		{
 			name:    "unknown top-level key",
 			yaml:    "registri: x\n",
 			wantErr: "registri",

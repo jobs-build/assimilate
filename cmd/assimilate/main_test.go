@@ -8,11 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/urfave/cli/v2"
+
+	"github.com/jobs-build/assimilate/internal/spec"
 )
 
 func TestReorderArgs(t *testing.T) {
@@ -212,6 +215,36 @@ func TestGithubToken(t *testing.T) {
 		stub(t, "", nil)
 		if _, err := githubToken(context.Background()); err == nil {
 			t.Fatal("want error when gh returns an empty token")
+		}
+	})
+}
+
+func TestGitToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("FORGEJO_TOKEN", "")
+
+	t.Run("forgejo from env", func(t *testing.T) {
+		t.Setenv("FORGEJO_TOKEN", "fj-tok")
+		got, err := gitToken(context.Background(), spec.GitConfig{Type: "forgejo"})
+		if err != nil || got != "fj-tok" {
+			t.Fatalf("got %q, %v; want fj-tok, nil", got, err)
+		}
+	})
+
+	t.Run("forgejo unset", func(t *testing.T) {
+		_, err := gitToken(context.Background(), spec.GitConfig{Type: "forgejo"})
+		if err == nil || !strings.Contains(err.Error(), "FORGEJO_TOKEN") {
+			t.Fatalf("err = %v, want mention of FORGEJO_TOKEN", err)
+		}
+	})
+
+	t.Run("github ignores FORGEJO_TOKEN", func(t *testing.T) {
+		t.Setenv("FORGEJO_TOKEN", "fj-tok")
+		t.Setenv("GITHUB_TOKEN", "gh-tok")
+		got, err := gitToken(context.Background(), spec.GitConfig{Type: "github"})
+		if err != nil || got != "gh-tok" {
+			t.Fatalf("got %q, %v; want gh-tok, nil", got, err)
 		}
 	})
 }

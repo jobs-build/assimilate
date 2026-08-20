@@ -42,7 +42,7 @@ verbatim — no jobs-build substitution.
 
 ```yaml
 git:
-  github:                       # key selects the GitOps repo type
+  github:                       # key selects the GitOps repo type (github or forgejo)
     repo: fables-for-robots/gitops   # owner/name
     path: clusters/staging           # directory within the repo to write to
     branch: main                     # optional; base branch for PRs (default: repo default branch)
@@ -52,6 +52,18 @@ registry: localhost:5000        # optional; host prefix of substituted image ref
 
 argocd:                         # optional; ArgoCD applications to roll out
   - url: https://argocd.example.com/applications/argocd/my-app
+```
+
+A `forgejo` GitOps repo takes the same keys plus the instance base URL
+(GitHub needs none — its host is fixed):
+
+```yaml
+git:
+  forgejo:
+    url: https://git.example.com     # instance the API and git remote live on
+    repo: my-org/gitops
+    path: clusters/staging
+    branch: main                     # optional
 ```
 
 ArgoCD entries are application URLs as copied from the ArgoCD UI —
@@ -66,7 +78,8 @@ and application from them.
 | `JOBS_SERVER` | jobs-iroh server endpoint ID (same var the jobs-client uses) |
 | `JOBS_SERVER_ADDR` | optional direct `host:port` for the server (skips discovery) |
 | `ASSIMILATE_DATA_DIR` | optional client store dir (default `~/.local/share/assimilate`; assimilate owns its store — `amber.Open`'s flock is single-process, so sharing jobs-client's dir would conflict) |
-| `GITHUB_TOKEN` (or `GH_TOKEN`) | GitOps repo push + PR create/merge; when unset, `gh auth token` is used if the user is logged in with the GitHub CLI |
+| `GITHUB_TOKEN` (or `GH_TOKEN`) | GitOps repo push + PR create/merge (github); when unset, `gh auth token` is used if the user is logged in with the GitHub CLI |
+| `FORGEJO_TOKEN` | GitOps repo push + PR create/merge (forgejo); needs read/write on repository, pull requests |
 | `ARGOCD_AUTH_TOKEN` (or `ARGOCD_TOKEN`) | ArgoCD API |
 | `ARGOCD_INSECURE=true` | skip TLS verification towards ArgoCD |
 
@@ -220,7 +233,7 @@ internal/jobs/        jobs-iroh client: store, ingest, push, submit, watch, log 
 internal/builds/      orchestration: dedupe, run all builds, emit spec.Event stream
 internal/ui/          bubbletea TUI + plain-line renderer, both consuming spec.Events
 internal/ownership/   generated-file markers: YAML hash comment, JSON hash sidecar
-internal/gitops/      go-git clone/branch/commit/push + GitHub PR create/merge
+internal/gitops/      go-git clone/branch/commit/push + provider PR create/merge (GitHub, Forgejo)
 internal/argocd/      minimal ArgoCD REST client (refresh, sync)
 ```
 
