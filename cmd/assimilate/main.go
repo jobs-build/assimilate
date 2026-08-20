@@ -25,6 +25,7 @@ import (
 	"github.com/jobs-build/assimilate/internal/jobs"
 	"github.com/jobs-build/assimilate/internal/project"
 	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/internal/tealogin"
 	"github.com/jobs-build/assimilate/internal/tmpl"
 	"github.com/jobs-build/assimilate/internal/ui"
 )
@@ -228,6 +229,12 @@ func deploy(c *cli.Context) error {
 		return err
 	}
 
+	// Builds can outlast a short-lived OAuth access token; resolve again
+	// right before the publish (a refresh only happens when needed).
+	if gitTok, err = gitToken(ctx, cfg.Git); err != nil {
+		return err
+	}
+
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	res, err := gitops.Publish(ctx, cfg.Git, gitTok, gitops.Change{
 		Env:     env,
@@ -325,12 +332,21 @@ var ghAuthToken = func(ctx context.Context) (string, error) {
 }
 
 // gitToken resolves the credential for the configured GitOps provider.
+// For forgejo: the environment first, then the tea-style CLI configs
+// (forgejo's, then tea's), refreshing an expiring OAuth login in place.
 func gitToken(ctx context.Context, cfg spec.GitConfig) (string, error) {
 	if cfg.Type == "forgejo" {
-		if t := os.Getenv("FORGEJO_TOKEN"); t != "" {
+		if t := firstEnv("FORGEJO_TOKEN", "GITEA_TOKEN"); t != "" {
 			return t, nil
 		}
-		return "", errors.New("no Forgejo credential: set FORGEJO_TOKEN")
+		t, err := tealogin.Token(ctx, cfg.URL)
+		if err == nil {
+			return t, nil
+		}
+		if !errors.Is(err, tealogin.ErrNoLogin) {
+			return "", err
+		}
+		return "", errors.New("no Forgejo credential: set FORGEJO_TOKEN (or GITEA_TOKEN), or log in with `tea login add`")
 	}
 	return githubToken(ctx)
 }

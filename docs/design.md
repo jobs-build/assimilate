@@ -79,7 +79,7 @@ and application from them.
 | `JOBS_SERVER_ADDR` | optional direct `host:port` for the server (skips discovery) |
 | `ASSIMILATE_DATA_DIR` | optional client store dir (default `~/.local/share/assimilate`; assimilate owns its store — `amber.Open`'s flock is single-process, so sharing jobs-client's dir would conflict) |
 | `GITHUB_TOKEN` (or `GH_TOKEN`) | GitOps repo push + PR create/merge (github); when unset, `gh auth token` is used if the user is logged in with the GitHub CLI |
-| `FORGEJO_TOKEN` | GitOps repo push + PR create/merge (forgejo); needs read/write on repository, pull requests |
+| `FORGEJO_TOKEN` (or `GITEA_TOKEN`) | GitOps repo push + PR create/merge (forgejo). When unset, the tea-style CLI configs are consulted — `forgejo/config.yml`, then `tea/config.yml`, resolved like tea does (adrg/xdg) — and an expiring OAuth login is refreshed and persisted in place, speaking tea's exact on-disk protocol: same YAML schema, same `<config>.lock` flock, same `/login/oauth/access_token` exchange with tea's public client ID. Keyring-backed logins (`auth_method: oauth`) are not readable; use the env var for those. The token is re-resolved right before the GitOps publish, since builds can outlast a short-lived access token. |
 | `ARGOCD_AUTH_TOKEN` (or `ARGOCD_TOKEN`) | ArgoCD API |
 | `ARGOCD_INSECURE=true` | skip TLS verification towards ArgoCD |
 

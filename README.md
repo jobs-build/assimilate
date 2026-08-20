@@ -125,7 +125,7 @@ git:
 | `JOBS_SERVER` | jobs-iroh server endpoint ID |
 | `JOBS_SERVER_ADDR` | optional direct `host:port` (skips discovery; comma-separable) |
 | `GITHUB_TOKEN` / `GH_TOKEN` | GitOps repo push + PR create/merge (github); falls back to `gh auth token` when unset |
-| `FORGEJO_TOKEN` | GitOps repo push + PR create/merge (forgejo); needs read/write on repository, pull requests |
+| `FORGEJO_TOKEN` / `GITEA_TOKEN` | GitOps repo push + PR create/merge (forgejo); when unset, falls back to the tea-style CLI configs — `forgejo/config.yml`, then `tea/config.yml` (XDG paths) — refreshing an expiring OAuth login in place, exactly as tea would |
 | `ARGOCD_AUTH_TOKEN` / `ARGOCD_TOKEN` | ArgoCD API (`--rollout`) |
 | `ARGOCD_INSECURE=true` | skip TLS verification towards ArgoCD |
 | `ASSIMILATE_DATA_DIR` | local store dir (default `~/.local/share/assimilate`) |

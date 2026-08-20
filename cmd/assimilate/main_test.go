@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/adrg/xdg"
 	"github.com/urfave/cli/v2"
 
 	"github.com/jobs-build/assimilate/internal/spec"
@@ -219,28 +221,69 @@ func TestGithubToken(t *testing.T) {
 	})
 }
 
+// isolateXDG points the CLI-config search at a fresh temp dir so tests
+// never read (or refresh!) the developer's real tea logins.
+func isolateXDG(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_CONFIG_DIRS", filepath.Join(dir, "sys"))
+	xdg.Reload()
+	t.Cleanup(xdg.Reload)
+	return dir
+}
+
 func TestGitToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("FORGEJO_TOKEN", "")
+	t.Setenv("GITEA_TOKEN", "")
+	isolateXDG(t)
+	fjCfg := spec.GitConfig{Type: "forgejo", URL: "https://git.example.com"}
 
 	t.Run("forgejo from env", func(t *testing.T) {
 		t.Setenv("FORGEJO_TOKEN", "fj-tok")
-		got, err := gitToken(context.Background(), spec.GitConfig{Type: "forgejo"})
+		t.Setenv("GITEA_TOKEN", "gt-tok")
+		got, err := gitToken(context.Background(), fjCfg)
 		if err != nil || got != "fj-tok" {
 			t.Fatalf("got %q, %v; want fj-tok, nil", got, err)
 		}
 	})
 
-	t.Run("forgejo unset", func(t *testing.T) {
-		_, err := gitToken(context.Background(), spec.GitConfig{Type: "forgejo"})
+	t.Run("forgejo GITEA_TOKEN fallback", func(t *testing.T) {
+		t.Setenv("GITEA_TOKEN", "gt-tok")
+		got, err := gitToken(context.Background(), fjCfg)
+		if err != nil || got != "gt-tok" {
+			t.Fatalf("got %q, %v; want gt-tok, nil", got, err)
+		}
+	})
+
+	t.Run("forgejo falls back to CLI config", func(t *testing.T) {
+		home := isolateXDG(t)
+		path := filepath.Join(home, "tea", "config.yml")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg := "logins:\n    - name: x\n      url: https://git.example.com\n      token: cli-tok\n"
+		if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := gitToken(context.Background(), fjCfg)
+		if err != nil || got != "cli-tok" {
+			t.Fatalf("got %q, %v; want cli-tok, nil", got, err)
+		}
+	})
+
+	t.Run("forgejo no source", func(t *testing.T) {
+		_, err := gitToken(context.Background(), fjCfg)
 		if err == nil || !strings.Contains(err.Error(), "FORGEJO_TOKEN") {
 			t.Fatalf("err = %v, want mention of FORGEJO_TOKEN", err)
 		}
 	})
 
-	t.Run("github ignores FORGEJO_TOKEN", func(t *testing.T) {
+	t.Run("github ignores forgejo tokens", func(t *testing.T) {
 		t.Setenv("FORGEJO_TOKEN", "fj-tok")
+		t.Setenv("GITEA_TOKEN", "gt-tok")
 		t.Setenv("GITHUB_TOKEN", "gh-tok")
 		got, err := gitToken(context.Background(), spec.GitConfig{Type: "github"})
 		if err != nil || got != "gh-tok" {
