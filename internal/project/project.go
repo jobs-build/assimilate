@@ -91,12 +91,20 @@ type fileConfig struct {
 }
 
 // gitSection holds one provider key. Extra keys are rejected by strict
-// decoding, so "exactly one provider" reduces to GitHub being set.
+// decoding, so "exactly one provider" reduces to exactly one field set.
 type gitSection struct {
-	GitHub *githubSection `yaml:"github"`
+	GitHub  *githubSection  `yaml:"github"`
+	Forgejo *forgejoSection `yaml:"forgejo"`
 }
 
 type githubSection struct {
+	Repo   string `yaml:"repo"`
+	Path   string `yaml:"path"`
+	Branch string `yaml:"branch"`
+}
+
+type forgejoSection struct {
+	URL    string `yaml:"url"`
 	Repo   string `yaml:"repo"`
 	Path   string `yaml:"path"`
 	Branch string `yaml:"branch"`
@@ -109,10 +117,11 @@ type argoEntry struct {
 // LoadConfig reads and validates <envDir>/assimilate.yaml.
 //
 // Schema (see docs/design.md): a `git` mapping with exactly one provider key
-// (currently `github`) carrying repo (owner/name), path, and optional branch;
-// an optional `registry` (default localhost:5000); an optional `argocd` list
-// of {url: <application URL>} entries parsed by ParseArgoURL. Unknown top
-// level or provider keys are errors.
+// (`github` or `forgejo`) carrying repo (owner/name), path, optional branch,
+// and — forgejo only — the instance base url; an optional `registry` (default
+// localhost:5000); an optional `argocd` list of {url: <application URL>}
+// entries parsed by ParseArgoURL. Unknown top level or provider keys are
+// errors.
 func LoadConfig(envDir string) (spec.Config, error) {
 	file := filepath.Join(envDir, ConfigFile)
 	data, err := os.ReadFile(file)
@@ -133,18 +142,11 @@ func LoadConfig(envDir string) (spec.Config, error) {
 
 	// git absent is allowed (render needs no repo; deploy errors later).
 	if fc.Git != nil {
-		if fc.Git.GitHub == nil {
-			return spec.Config{}, fmt.Errorf("%s: git must contain exactly one provider key (github)", file)
-		}
-		gh := fc.Git.GitHub
-		if err := checkRepo(gh.Repo); err != nil {
-			return spec.Config{}, fmt.Errorf("%s: git.github.repo: %w", file, err)
-		}
-		cleaned, err := cleanRepoPath(gh.Path)
+		g, err := gitConfig(fc.Git)
 		if err != nil {
-			return spec.Config{}, fmt.Errorf("%s: git.github.path: %w", file, err)
+			return spec.Config{}, fmt.Errorf("%s: %w", file, err)
 		}
-		cfg.Git = spec.GitConfig{Type: "github", Repo: gh.Repo, Path: cleaned, Branch: gh.Branch}
+		cfg.Git = g
 	}
 
 	for i, e := range fc.ArgoCD {
@@ -158,6 +160,55 @@ func LoadConfig(envDir string) (spec.Config, error) {
 		cfg.ArgoCD = append(cfg.ArgoCD, app)
 	}
 	return cfg, nil
+}
+
+// gitConfig validates the git section's single provider entry and folds it
+// into the provider-neutral spec.GitConfig.
+func gitConfig(g *gitSection) (spec.GitConfig, error) {
+	switch {
+	case g.GitHub != nil && g.Forgejo == nil:
+		gh := g.GitHub
+		if err := checkRepo(gh.Repo); err != nil {
+			return spec.GitConfig{}, fmt.Errorf("git.github.repo: %w", err)
+		}
+		cleaned, err := cleanRepoPath(gh.Path)
+		if err != nil {
+			return spec.GitConfig{}, fmt.Errorf("git.github.path: %w", err)
+		}
+		return spec.GitConfig{Type: "github", Repo: gh.Repo, Path: cleaned, Branch: gh.Branch}, nil
+	case g.Forgejo != nil && g.GitHub == nil:
+		fj := g.Forgejo
+		base, err := checkBaseURL(fj.URL)
+		if err != nil {
+			return spec.GitConfig{}, fmt.Errorf("git.forgejo.url: %w", err)
+		}
+		if err := checkRepo(fj.Repo); err != nil {
+			return spec.GitConfig{}, fmt.Errorf("git.forgejo.repo: %w", err)
+		}
+		cleaned, err := cleanRepoPath(fj.Path)
+		if err != nil {
+			return spec.GitConfig{}, fmt.Errorf("git.forgejo.path: %w", err)
+		}
+		return spec.GitConfig{Type: "forgejo", URL: base, Repo: fj.Repo, Path: cleaned, Branch: fj.Branch}, nil
+	default:
+		return spec.GitConfig{}, errors.New("git must contain exactly one provider key (github or forgejo)")
+	}
+}
+
+// checkBaseURL requires an absolute http(s) URL with a host — the instance
+// both the API and the git remote live on — and trims a trailing slash.
+func checkBaseURL(raw string) (string, error) {
+	if raw == "" {
+		return "", errors.New("required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("%q is not an http(s) URL", raw)
+	}
+	return strings.TrimSuffix(raw, "/"), nil
 }
 
 // checkRepo requires the owner/name form: exactly one slash, both sides

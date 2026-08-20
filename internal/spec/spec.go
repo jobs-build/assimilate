@@ -111,7 +111,8 @@ type Config struct {
 
 // GitConfig describes the GitOps repository to publish rendered manifests to.
 type GitConfig struct {
-	Type   string // provider, from the config key: "github"
+	Type   string // provider, from the config key: "github" or "forgejo"
+	URL    string // forgejo only: instance base URL, e.g. https://git.example.com
 	Repo   string // owner/name
 	Path   string // directory within the repo to write rendered files under
 	Branch string // base branch for PRs; "" = repository default branch

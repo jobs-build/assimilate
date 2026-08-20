@@ -42,15 +42,23 @@ func stubGit(t *testing.T, upstream string) {
 	now = func() time.Time { return testStamp }
 }
 
-// stubAPI points the PR half at an httptest server via enterprise URLs and
-// collapses the merge retry backoff.
+// stubAPI points the GitHub PR half at an httptest server via enterprise
+// URLs and collapses the merge retry backoff.
 func stubAPI(t *testing.T, srv *httptest.Server) {
 	t.Helper()
-	origAPI, origBackoff := apiClient, mergeBackoff
-	t.Cleanup(func() { apiClient, mergeBackoff = origAPI, origBackoff })
+	origAPI := apiClient
+	t.Cleanup(func() { apiClient = origAPI })
 	apiClient = func(string) (*github.Client, error) {
 		return github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
 	}
+	stubBackoff(t)
+}
+
+// stubBackoff collapses the merge retry backoff.
+func stubBackoff(t *testing.T) {
+	t.Helper()
+	origBackoff := mergeBackoff
+	t.Cleanup(func() { mergeBackoff = origBackoff })
 	mergeBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 }
 
@@ -604,6 +612,261 @@ func TestOpenPRBranchDeleteBestEffort(t *testing.T) {
 	}
 }
 
+// fakeForgejo serves the canned Forgejo API endpoints Publish uses. The
+// version probe the SDK issues at client construction is answered but not
+// recorded, so call assertions see only the real work.
+type fakeForgejo struct {
+	t             *testing.T
+	defaultBranch string
+	prNumber      int
+	prURL         string
+	mergeStatuses []int // per-attempt status; past the end → 200
+	calls         []ghCall
+}
+
+func (f *fakeForgejo) merges() int {
+	n := 0
+	for _, c := range f.calls {
+		if c.method == "POST" && strings.HasSuffix(c.path, "/merge") {
+			n++
+		}
+	}
+	return n
+}
+
+func (f *fakeForgejo) find(method, pathSuffix string) *ghCall {
+	for i, c := range f.calls {
+		if c.method == method && strings.HasSuffix(c.path, pathSuffix) {
+			return &f.calls[i]
+		}
+	}
+	return nil
+}
+
+func (f *fakeForgejo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	p, m := r.URL.Path, r.Method
+	if m == "GET" && p == "/api/v1/version" {
+		fmt.Fprint(w, `{"version": "12.0.0"}`)
+		return
+	}
+
+	call := ghCall{method: m, path: p}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&call.body)
+	}
+	merges := f.merges()
+	f.calls = append(f.calls, call)
+
+	switch {
+	case m == "GET" && p == "/api/v1/repos/acme/gitops":
+		fmt.Fprintf(w, `{"default_branch": %q}`, f.defaultBranch)
+	case m == "POST" && p == "/api/v1/repos/acme/gitops/pulls":
+		fmt.Fprintf(w, `{"number": %d, "html_url": %q}`, f.prNumber, f.prURL)
+	case m == "POST" && p == fmt.Sprintf("/api/v1/repos/acme/gitops/pulls/%d/merge", f.prNumber):
+		if merges < len(f.mergeStatuses) && f.mergeStatuses[merges] != 200 {
+			w.WriteHeader(f.mergeStatuses[merges])
+			fmt.Fprint(w, `{"message": "Please try again later"}`)
+			return
+		}
+	case m == "DELETE" && strings.HasPrefix(p, "/api/v1/repos/acme/gitops/branches/"):
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		f.t.Errorf("unexpected request %s %s", m, p)
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message": "not found"}`)
+	}
+}
+
+func newFakeForgejo(t *testing.T) (*fakeForgejo, *httptest.Server) {
+	f := &fakeForgejo{t: t, defaultBranch: "main", prNumber: 7, prURL: "https://git.example.com/acme/gitops/pulls/7"}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	return f, srv
+}
+
+func forgejoCfg(url, branch string) spec.GitConfig {
+	return spec.GitConfig{Type: "forgejo", URL: url, Repo: "acme/gitops", Path: "clusters/staging", Branch: branch}
+}
+
+func TestOpenPRForgejo(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cfgBranch string
+		wantBase  string
+		wantGets  int // repo lookups to resolve the default branch
+	}{
+		{"explicit base", "main", "main", 0},
+		{"default branch resolved", "", "trunk", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newFakeForgejo(t)
+			f.defaultBranch = "trunk"
+			cfg := forgejoCfg(srv.URL, tc.cfgBranch)
+			ch := testChange()
+
+			var logs []string
+			res, err := openPR(context.Background(), cfg, "tok", ch, testBranch, false, func(s string) { logs = append(logs, s) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := Result{Branch: testBranch, PRURL: f.prURL, PRNumber: 7}
+			if res != want {
+				t.Fatalf("res = %+v, want %+v", res, want)
+			}
+
+			gets := 0
+			for _, c := range f.calls {
+				if c.method == "GET" {
+					gets++
+				}
+			}
+			if gets != tc.wantGets {
+				t.Errorf("repo GETs = %d, want %d", gets, tc.wantGets)
+			}
+			create := f.find("POST", "/pulls")
+			if create == nil {
+				t.Fatalf("no PR create call in %+v", f.calls)
+			}
+			for k, want := range map[string]string{
+				"title": "assimilate: deploy staging",
+				"head":  testBranch,
+				"base":  tc.wantBase,
+				"body":  ch.Message,
+			} {
+				if got := create.body[k]; got != want {
+					t.Errorf("create body %s = %v, want %q", k, got, want)
+				}
+			}
+			if n := f.merges(); n != 0 {
+				t.Errorf("merge calls = %d without rollout", n)
+			}
+			if len(logs) != 1 || logs[0] != "PR #7 opened" {
+				t.Errorf("logs = %q", logs)
+			}
+		})
+	}
+}
+
+func TestOpenPRForgejoRollout(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		mergeStatuses []int
+		wantMerges    int
+		wantErr       bool
+	}{
+		{"merges immediately", nil, 1, false},
+		{"retries 409 then 405", []int{409, 405, 200}, 3, false},
+		{"gives up after retries", []int{409, 409, 409, 409}, 4, true},
+		{"non-retryable status", []int{403}, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newFakeForgejo(t)
+			f.mergeStatuses = tc.mergeStatuses
+			stubBackoff(t)
+			cfg := forgejoCfg(srv.URL, "main")
+
+			var logs []string
+			res, err := openPR(context.Background(), cfg, "tok", testChange(), testBranch, true, func(s string) { logs = append(logs, s) })
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if n := f.merges(); n != tc.wantMerges {
+				t.Errorf("merge attempts = %d, want %d", n, tc.wantMerges)
+			}
+			merge := f.find("POST", "/merge")
+			if merge == nil {
+				t.Fatal("no merge call")
+			}
+			if got := merge.body["Do"]; got != "squash" {
+				t.Errorf("merge style = %v, want squash", got)
+			}
+			del := f.find("DELETE", "/branches/"+testBranch)
+			if tc.wantErr {
+				if res.Merged {
+					t.Error("Merged = true on failed merge")
+				}
+				if del != nil {
+					t.Error("branch deleted despite failed merge")
+				}
+				return
+			}
+			if !res.Merged {
+				t.Error("Merged = false")
+			}
+			if del == nil {
+				t.Errorf("no branch delete call in %+v", f.calls)
+			}
+			if want := []string{"PR #7 opened", "merged PR #7"}; len(logs) != 2 || logs[0] != want[0] || logs[1] != want[1] {
+				t.Errorf("logs = %q, want %q", logs, want)
+			}
+		})
+	}
+}
+
+// Failing to delete the branch after a merge is logged, not fatal.
+func TestOpenPRForgejoBranchDeleteBestEffort(t *testing.T) {
+	f, srv := newFakeForgejo(t)
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "DELETE" {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message": "protected"}`)
+			return
+		}
+		f.ServeHTTP(w, r)
+	})
+	cfg := forgejoCfg(srv.URL, "main")
+	res, err := openPR(context.Background(), cfg, "tok", testChange(), testBranch, true, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Merged {
+		t.Error("Merged = false")
+	}
+}
+
+func TestPublishForgejo(t *testing.T) {
+	upstream := seedUpstream(t, map[string]string{"clusters/staging/api.yaml": marked("old\n")})
+	f, srv := newFakeForgejo(t)
+	stubGit(t, upstream)
+	stubBackoff(t)
+	cfg := forgejoCfg(srv.URL, "main")
+	ch := testChange()
+
+	res, err := Publish(context.Background(), cfg, "", ch, true, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Result{Branch: testBranch, PRURL: f.prURL, PRNumber: 7, Merged: true}
+	if res != want {
+		t.Fatalf("res = %+v, want %+v", res, want)
+	}
+	if _, files := branchTip(t, upstream, testBranch); files["clusters/staging/api.yaml"] != marked(string(ch.Files["api.yaml"])) {
+		t.Error("pushed branch missing rendered file")
+	}
+	create := f.find("POST", "/pulls")
+	if create == nil || create.body["head"] != res.Branch {
+		t.Errorf("PR create = %+v", create)
+	}
+	if f.merges() != 1 || f.find("DELETE", "/branches/"+testBranch) == nil {
+		t.Errorf("rollout calls = %+v", f.calls)
+	}
+}
+
+func TestCloneURL(t *testing.T) {
+	for _, tc := range []struct {
+		cfg  spec.GitConfig
+		want string
+	}{
+		{spec.GitConfig{Type: "github", Repo: "acme/gitops"}, "https://github.com/acme/gitops.git"},
+		{spec.GitConfig{Type: "forgejo", URL: "https://git.example.com", Repo: "acme/gitops"}, "https://git.example.com/acme/gitops.git"},
+	} {
+		if got := cloneURL(tc.cfg); got != tc.want {
+			t.Errorf("cloneURL(%+v) = %q, want %q", tc.cfg, got, tc.want)
+		}
+	}
+}
+
 func TestPublish(t *testing.T) {
 	upstream := seedUpstream(t, map[string]string{"clusters/staging/api.yaml": marked("old\n")})
 	f, srv := newFakeGitHub(t)
@@ -665,6 +928,8 @@ func TestPublishRejectsConfig(t *testing.T) {
 		{"empty provider", spec.GitConfig{Repo: "acme/gitops"}},
 		{"malformed repo", spec.GitConfig{Type: "github", Repo: "gitops"}},
 		{"repo with extra segment", spec.GitConfig{Type: "github", Repo: "a/b/c"}},
+		{"forgejo without url", spec.GitConfig{Type: "forgejo", Repo: "acme/gitops"}},
+		{"forgejo malformed repo", spec.GitConfig{Type: "forgejo", URL: "https://git.example.com", Repo: "gitops"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Publish(context.Background(), tc.cfg, "", testChange(), false, discard); err == nil {
