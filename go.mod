@@ -13,9 +13,9 @@ require (
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/gofrs/flock v0.13.0
 	github.com/google/go-github/v73 v73.0.0
-	github.com/jobs-build/amber-store-core v0.0.0-20260727080459-e4fcb60cba49
-	github.com/jobs-build/jobs-iroh v0.29.0
-	github.com/tmc/go-iroh v0.0.0-20260815195718-8aca5f0f793e
+	github.com/jobs-build/amber-store-core v0.0.2
+	github.com/jobs-build/jobs-iroh v0.31.0
+	github.com/tmc/go-iroh v0.1.0
 	github.com/urfave/cli/v2 v2.27.7
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.47.0

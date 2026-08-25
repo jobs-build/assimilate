@@ -17,14 +17,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jobs-build/amber-store-core/key"
 	"github.com/jobs-build/jobs-iroh/amber"
 	"github.com/jobs-build/jobs-iroh/amberclient"
 	"github.com/jobs-build/jobs-iroh/api"
 	"github.com/jobs-build/jobs-iroh/builddef"
+	"github.com/jobs-build/jobs-iroh/gcsweep"
 	"github.com/jobs-build/jobs-iroh/importdef"
 	"golang.org/x/sys/unix"
 
@@ -86,7 +89,13 @@ type Handle struct {
 // Local is the offline half: the embedded amber store and definition math.
 // It is enough to compute image references without any server.
 type Local struct {
-	store *amber.Store
+	store   *amber.Store
+	dataDir string
+	// gc is the local-store sweeper (jobs-iroh's gcsweep, the same engine
+	// jobs-client embeds): its read observer records ref touches while the
+	// store is open, and MaybeGC runs the stamp-gated sweep. nil = disabled
+	// (JOBS_GC_RETENTION=0 or construction failure).
+	gc *gcsweep.Sweeper
 }
 
 // Open opens (creating if needed) assimilate's own amber store under dataDir.
@@ -105,12 +114,75 @@ func Open(dataDir string) (*Local, error) {
 		}
 		return nil, fmt.Errorf("open store under %s: %w", dataDir, err)
 	}
-	return &Local{store: st}, nil
+	l := &Local{store: st, dataDir: dataDir}
+	if ret := gcRetention(); ret > 0 {
+		sw, err := gcsweep.New(slog.Default(), st, gcsweep.Options{
+			StoreDir:     filepath.Join(dataDir, "store"),
+			SnapshotPath: filepath.Join(dataDir, "refaccess.cbor"),
+			Retention:    ret,
+		})
+		if err != nil {
+			// GC must never block a deploy: warn and run without it.
+			fmt.Fprintf(os.Stderr, "gc disabled for this run: %v\n", err)
+		} else {
+			l.gc = sw
+		}
+	}
+	return l, nil
 }
 
-// Close releases the store.
+// Close flushes the GC tracker (sweeper first — it must not touch the
+// store after it closes) and releases the store.
 func (l *Local) Close() error {
+	if l.gc != nil {
+		l.gc.Close()
+	}
 	return l.store.Close()
+}
+
+// gcRetention is the local GC expiry window: JOBS_GC_RETENTION (Go
+// duration; "0" disables — the same knob jobs-client honors, so one
+// setting governs the whole toolchain), default 30 days. An unparsable
+// value disables with a warning rather than failing the command.
+func gcRetention() time.Duration {
+	v := os.Getenv("JOBS_GC_RETENTION")
+	if v == "" {
+		return 720 * time.Hour
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		fmt.Fprintf(os.Stderr, "ignoring invalid JOBS_GC_RETENTION %q; gc disabled\n", v)
+		return 0
+	}
+	return d
+}
+
+// gcCheckEvery is how often MaybeGC is allowed to sweep; the stamp file's
+// mtime is the record.
+const gcCheckEvery = 24 * time.Hour
+
+// MaybeGC runs the opportunistic local-store sweep: at most once per
+// gcCheckEvery (stamp-gated), after a command's main work, while the store
+// is still open. Silent unless something was reclaimed; never fails the
+// command. The store's exclusive flock means no concurrent reader exists.
+func (l *Local) MaybeGC(ctx context.Context) {
+	if l.gc == nil {
+		return
+	}
+	stamp := filepath.Join(l.dataDir, "gc.stamp")
+	if info, err := os.Stat(stamp); err == nil && time.Since(info.ModTime()) < gcCheckEvery {
+		return
+	}
+	stats, err := l.gc.Sweep(ctx, -1, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gc sweep failed (will retry within %s): %v\n", gcCheckEvery, err)
+		return
+	}
+	_ = os.WriteFile(stamp, nil, 0o644) // mtime is the record; content unused
+	if stats.ExpiredLast > 0 || stats.LastCycleFreed > 0 {
+		fmt.Fprintf(os.Stderr, "gc: expired %d refs, freed %d bytes\n",
+			stats.ExpiredLast, stats.LastCycleFreed)
+	}
 }
 
 // Ingest ingests the source directory (honoring .amberignore) and returns

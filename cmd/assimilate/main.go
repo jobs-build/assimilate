@@ -222,6 +222,7 @@ func deploy(c *cli.Context) error {
 		for _, r := range results {
 			images[r.Spec.Key()] = r.ImageRef
 		}
+		local.MaybeGC(ctx) // opportunistic local-store sweep, at most daily
 	}
 
 	files, err := x.Render(images)
@@ -292,6 +293,7 @@ func render(c *cli.Context) error {
 			}
 			images[s.Key()] = spec.ImageRef(cfg.Registry, k)
 		}
+		local.MaybeGC(c.Context) // opportunistic local-store sweep, at most daily
 	}
 	files, err := x.Render(images)
 	if err != nil {
