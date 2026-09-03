@@ -218,10 +218,15 @@ against an older server the image rows simply never become expandable.
    domain is a conflict; a marker without a domain is adopted.
    Then every YAML/JSON file under `<path>` that carries this domain's
    marker but was not rendered is pruned (JSON with its sidecar); an edited
-   one is a conflict. Other domains' files, unmarked files and pre-domain
-   markers are never pruned, so several source repos can share one GitOps
-   directory. All conflicts are listed and the publication is refused,
-   unless `--force` overwrites/prunes them (logged per file).
+   one is a conflict. Other domains' files and unmarked files are never
+   pruned, so several source repos can share one GitOps directory. Stale
+   files with a pre-domain marker name no owner: they are left alone and
+   listed in the log, unless the deploy runs with `--adopt-legacy=<dir>`,
+   which prunes the ones under that subtree of `<path>` as this domain's
+   (the one-time migration from ≤ 0.5; the operator picks a subtree holding
+   only this repo's and environment's files). All conflicts are listed and
+   the publication is refused, unless `--force` overwrites/prunes them
+   (logged per file).
    A missing `assimilate-domain` fails config loading with a suggestion:
    the git root directory's name, plus the project root's path below it.
 3. No diff against the base branch → report "no changes", skip the PR (a

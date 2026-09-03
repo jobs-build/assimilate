@@ -1047,8 +1047,14 @@ func TestPushBranchPrunes(t *testing.T) {
 			t.Errorf("logs %q missing %q", logs, want)
 		}
 	}
-	if strings.Contains(joined, "other.yaml") || strings.Contains(joined, "legacy.yaml") {
-		t.Errorf("logs mention files that must not be pruned: %q", logs)
+	if strings.Contains(joined, "other.yaml") {
+		t.Errorf("logs mention another domain's file: %q", logs)
+	}
+	// The stale pre-domain file is reported, with the way to adopt it.
+	for _, want := range []string{"1 stale file with a pre-domain marker left alone", "  clusters/staging/legacy.yaml", "--adopt-legacy"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("logs %q missing %q", logs, want)
+		}
 	}
 }
 
@@ -1184,4 +1190,124 @@ func TestPushBranchAdoptsLegacyMarker(t *testing.T) {
 	if joined := strings.Join(logs, "\n"); strings.Contains(joined, "overwriting") {
 		t.Errorf("legacy adoption logged as overwrite: %q", logs)
 	}
+}
+
+// --adopt-legacy=<dir>: stale files with pre-domain markers under
+// <path>/<dir> are treated as this domain's and pruned; those outside the
+// subtree are still left alone and reported; other domains' files are never
+// adopted. AdoptDir "" adopts everything under cfg.Path.
+func TestPushBranchAdoptsLegacyStale(t *testing.T) {
+	ch := testChange()
+	jsonBody := `{"a":1}` + "\n"
+	seed := map[string]string{
+		"clusters/staging/api.yaml":                            marked(string(ch.Files["api.yaml"])),
+		"clusters/staging/workers/queue.yaml":                  markedAs("", string(ch.Files["workers/queue.yaml"])), // rendered legacy: upgraded, not pruned
+		"clusters/staging/legacy.yaml":                         markedAs("", "kind: Legacy\n"),
+		"clusters/staging/svc/old.yaml":                        markedAs("", "kind: Gone\n"),
+		"clusters/staging/svc/cfg.json":                        jsonBody,
+		"clusters/staging/svc/cfg.json" + ownership.SidecarExt: ownership.ComputeBodyHash("x.json", []byte(jsonBody)) + "\n",
+		"clusters/staging/svc/other.yaml":                      markedAs("other", "kind: Theirs\n"),
+		"clusters/staging/svc/hand.yaml":                       "kind: Handwritten\n",
+		"clusters/staging/svc-two/old.yaml":                    markedAs("", "kind: Sibling\n"), // prefix of "svc" but not under it
+	}
+	cfg := spec.GitConfig{Type: "github", Repo: "acme/gitops", Path: "clusters/staging", Branch: "main"}
+
+	t.Run("subtree", func(t *testing.T) {
+		upstream := seedUpstream(t, seed)
+		stubGit(t, upstream)
+		ch := testChange()
+		ch.AdoptLegacy, ch.AdoptDir = true, "svc"
+		var logs []string
+		branch, noChanges, err := pushBranch(context.Background(), cfg, "", ch, func(s string) { logs = append(logs, s) })
+		if err != nil || noChanges {
+			t.Fatalf("noChanges=%v err=%v", noChanges, err)
+		}
+		_, files := branchTip(t, upstream, branch)
+		for _, gone := range []string{
+			"clusters/staging/svc/old.yaml",
+			"clusters/staging/svc/cfg.json",
+			"clusters/staging/svc/cfg.json" + ownership.SidecarExt,
+		} {
+			if _, ok := files[gone]; ok {
+				t.Errorf("%s not pruned", gone)
+			}
+		}
+		for _, kept := range []string{
+			"clusters/staging/legacy.yaml",
+			"clusters/staging/svc-two/old.yaml",
+			"clusters/staging/svc/other.yaml",
+			"clusters/staging/svc/hand.yaml",
+		} {
+			if _, ok := files[kept]; !ok {
+				t.Errorf("%s wrongly pruned", kept)
+			}
+		}
+		if got := files["clusters/staging/workers/queue.yaml"]; got != marked(string(ch.Files["workers/queue.yaml"])) {
+			t.Errorf("rendered legacy file not upgraded: %q", got)
+		}
+		joined := strings.Join(logs, "\n")
+		for _, want := range []string{
+			"pruning clusters/staging/svc/old.yaml (adopted pre-domain marker)",
+			"pruning clusters/staging/svc/cfg.json (adopted pre-domain marker)",
+			"2 stale files with pre-domain markers left alone",
+			"  clusters/staging/legacy.yaml",
+			"  clusters/staging/svc-two/old.yaml",
+		} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("logs %q missing %q", logs, want)
+			}
+		}
+	})
+
+	t.Run("whole path", func(t *testing.T) {
+		upstream := seedUpstream(t, seed)
+		stubGit(t, upstream)
+		ch := testChange()
+		ch.AdoptLegacy = true
+		var logs []string
+		branch, _, err := pushBranch(context.Background(), cfg, "", ch, func(s string) { logs = append(logs, s) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, files := branchTip(t, upstream, branch)
+		for _, gone := range []string{"clusters/staging/legacy.yaml", "clusters/staging/svc/old.yaml", "clusters/staging/svc-two/old.yaml"} {
+			if _, ok := files[gone]; ok {
+				t.Errorf("%s not pruned", gone)
+			}
+		}
+		if _, ok := files["clusters/staging/svc/other.yaml"]; !ok {
+			t.Error("another domain's file was adopted")
+		}
+		if joined := strings.Join(logs, "\n"); strings.Contains(joined, "left alone") {
+			t.Errorf("nothing should be left alone: %q", logs)
+		}
+	})
+
+	// An adopted file that was edited since is a conflict, like any other.
+	t.Run("edited", func(t *testing.T) {
+		edited := ownership.MarkerPrefix + ownership.ComputeBodyHash("x.yaml", []byte("original\n")) + "\nedited by hand\n"
+		upstream := seedUpstream(t, map[string]string{"clusters/staging/svc/old.yaml": edited})
+		stubGit(t, upstream)
+		ch := testChange()
+		ch.AdoptLegacy, ch.AdoptDir = true, "svc"
+		_, _, err := pushBranch(context.Background(), cfg, "", ch, discard)
+		if err == nil || !strings.Contains(err.Error(), "clusters/staging/svc/old.yaml: edited since assimilate generated it") {
+			t.Fatalf("err = %v", err)
+		}
+
+		upstream = seedUpstream(t, map[string]string{"clusters/staging/svc/old.yaml": edited})
+		stubGit(t, upstream)
+		ch.Force = true
+		var logs []string
+		branch, _, err := pushBranch(context.Background(), cfg, "", ch, func(s string) { logs = append(logs, s) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, files := branchTip(t, upstream, branch); files["clusters/staging/svc/old.yaml"] != "" {
+			t.Error("old.yaml not pruned")
+		}
+		if want := "pruning clusters/staging/svc/old.yaml (adopted pre-domain marker, edited since assimilate generated it)"; !strings.Contains(strings.Join(logs, "\n"), want) {
+			t.Errorf("logs %q missing %q", logs, want)
+		}
+	})
 }

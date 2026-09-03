@@ -105,13 +105,34 @@ is pushed.
 
 Files under the configured path that carry this domain but are no longer
 rendered are pruned in the same commit (a JSON file together with its
-sidecar). Files of other domains, files without a marker, and files with a
-pre-domain marker are never pruned, so several repos can share one GitOps
-directory and each only cleans up after itself. A stale file of this domain
-that was edited since is a conflict too.
+sidecar). Files of other domains and files without a marker are never
+pruned, so several repos can share one GitOps directory and each only cleans
+up after itself. A stale file of this domain that was edited since is a
+conflict too.
 
 `deploy --force` overwrites and prunes conflicting files anyway (each one is
 logged).
+
+### Migrating from assimilate ≤ 0.5
+
+Files published before domains existed carry only the hash line and name no
+owner. Those still rendered are simply upgraded on the next deploy. Those
+that stop being rendered cannot be told apart from another repo's files, so
+they are left alone and listed in the deploy output:
+
+```
+2 stale files with pre-domain markers left alone (no owner recorded; …):
+  manifests/hoodi/tally/tally.yaml
+  manifests/hoodi/tally/tally-config.json
+```
+
+Delete them by hand, or run the migration deploy once with
+`--adopt-legacy=<dir>`: stale pre-domain files under `<dir>` (relative to
+the configured path; `.` for all of it) are treated as this repo's and
+pruned like the rest, each logged as adopted. Pick `<dir>` so it holds only
+this repo's and environment's files — several environments publishing into
+one path each need their own deploy with their own subtree. After that
+deploy no pre-domain files of yours remain and the flag is not needed again.
 
 If `assimilate-domain` is missing, the error suggests one derived from the
 git checkout: the repository directory's name, extended by the project root's

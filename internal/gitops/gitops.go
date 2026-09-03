@@ -46,6 +46,13 @@ type Change struct {
 	// edited since. Without Force such files are conflicts and the
 	// publication is refused.
 	Force bool
+	// AdoptLegacy treats stale files whose marker predates domains (and so
+	// names no owner) as this domain's for pruning, limited to the subtree
+	// AdoptDir of cfg.Path ("" = all of it). Without it such files are left
+	// alone and reported. Meant for the one deploy that migrates a GitOps
+	// directory written by assimilate ≤ 0.5.
+	AdoptLegacy bool
+	AdoptDir    string
 }
 
 // Result reports what happened.
@@ -229,10 +236,13 @@ func writeFiles(dir string, cfg spec.GitConfig, ch Change, log func(string)) ([]
 
 // pruneFiles deletes every YAML/JSON file under cfg.Path in the clone at dir
 // that assimilate generated for ch.Domain but ch.Files no longer renders (a
-// JSON file together with its sidecar). Files of other domains, of no
-// domain (pre-domain markers) and without a marker are left alone. A stale
-// file of ch.Domain edited since it was generated is a conflict: skipped
-// and returned without ch.Force, pruned with a log note with it.
+// JSON file together with its sidecar). Files of other domains and files
+// without a marker are left alone. So are stale files with a pre-domain
+// marker (no owner recorded) — reported in one log note, since they can
+// only be cleaned up by hand or by a deploy with ch.AdoptLegacy, which
+// prunes those under ch.AdoptDir as this domain's. A stale file edited
+// since it was generated is a conflict: skipped and returned without
+// ch.Force, pruned with a log note with it.
 func pruneFiles(dir string, cfg spec.GitConfig, ch Change, log func(string)) ([]string, error) {
 	base := filepath.Join(dir, filepath.FromSlash(cfg.Path))
 	found, err := ownership.Scan(base)
@@ -244,28 +254,57 @@ func pruneFiles(dir string, cfg spec.GitConfig, ch Change, log func(string)) ([]
 		rels = append(rels, rel)
 	}
 	sort.Strings(rels)
-	var conflicts []string
+	var conflicts, leftAlone []string
 	for _, rel := range rels {
 		st := found[rel]
-		if _, rendered := ch.Files[rel]; rendered || !st.Owned || st.Domain != ch.Domain {
+		if _, rendered := ch.Files[rel]; rendered || !st.Owned {
 			continue
 		}
 		repoPath := path.Join(filepath.ToSlash(cfg.Path), rel)
-		note := ""
+		var notes []string
+		switch {
+		case st.Domain == ch.Domain:
+		case st.Domain != "":
+			continue // another domain's file
+		case ch.AdoptLegacy && underDir(rel, ch.AdoptDir):
+			notes = append(notes, "adopted pre-domain marker")
+		default:
+			leftAlone = append(leftAlone, "  "+repoPath)
+			continue
+		}
 		if !st.Matches {
 			reason := "edited since assimilate generated it"
 			if !ch.Force {
 				conflicts = append(conflicts, "  "+repoPath+": "+reason)
 				continue
 			}
-			note = " (" + reason + ")"
+			notes = append(notes, reason)
 		}
 		if err := ownership.Remove(filepath.Join(base, filepath.FromSlash(rel))); err != nil {
 			return nil, err
 		}
+		note := ""
+		if len(notes) > 0 {
+			note = " (" + strings.Join(notes, ", ") + ")"
+		}
 		log("pruning " + repoPath + note)
 	}
+	if n := len(leftAlone); n > 0 {
+		plural := "s with pre-domain markers"
+		if n == 1 {
+			plural = " with a pre-domain marker"
+		}
+		log(fmt.Sprintf("%d stale file%s left alone (no owner recorded; not rendered by this deploy — "+
+			"delete by hand, or re-run with --adopt-legacy=<dir> to prune the ones under <dir> as this repo's):\n%s",
+			n, plural, strings.Join(leftAlone, "\n")))
+	}
 	return conflicts, nil
+}
+
+// underDir reports whether the slash path rel lies within dir ("" = the
+// root, i.e. everything).
+func underDir(rel, dir string) bool {
+	return dir == "" || strings.HasPrefix(rel, dir+"/")
 }
 
 // conflictReason explains why an existing target must not be overwritten
