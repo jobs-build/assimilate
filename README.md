@@ -83,19 +83,46 @@ anchors/aliases or `<<` merge keys — the template scanner rejects them.
 Files without substitutions are copied byte-identical; substituted files keep
 their comments.
 
-## Ownership markers
+## Ownership markers and pruning
 
-Every file assimilate publishes carries a checksum of its content: YAML files
-as a `# assimilate-hash: <sha256>` first line, JSON files in a committed
-sidecar named `<file>.json.assimilate`. On the next deploy, assimilate only
-overwrites files whose marker is present and still matches — a file somebody
-created or edited by hand is a conflict, listed in the error, and nothing is
-pushed. `deploy --force` overwrites conflicting files anyway (each one is
-logged). Files assimilate no longer renders are never pruned.
+Every file assimilate publishes carries a marker: YAML files as a two-line
+comment header, JSON files in a committed sidecar named
+`<file>.json.assimilate` holding the same two lines:
+
+```yaml
+# assimilate-hash: <sha256 of the body>
+# assimilate-domain: monorepo
+```
+
+The hash tells assimilate whether anybody edited the file since; the domain
+is the `assimilate-domain` from the environment config, naming the source
+repo the file was rendered from. On the next deploy, assimilate only
+overwrites files whose marker is present, still matches, and carries its own
+domain (or none — files from before domains existed are adopted). A file
+somebody created or edited by hand, or one another repo's assimilate
+generated at the same path, is a conflict, listed in the error, and nothing
+is pushed.
+
+Files under the configured path that carry this domain but are no longer
+rendered are pruned in the same commit (a JSON file together with its
+sidecar). Files of other domains, files without a marker, and files with a
+pre-domain marker are never pruned, so several repos can share one GitOps
+directory and each only cleans up after itself. A stale file of this domain
+that was edited since is a conflict too.
+
+`deploy --force` overwrites and prunes conflicting files anyway (each one is
+logged).
+
+If `assimilate-domain` is missing, the error suggests one derived from the
+git checkout: the repository directory's name, extended by the project root's
+path below it when the project is not at the repository root (for example
+`monorepo` or `monorepo/apps/shop`).
 
 ## Environment config (`assimilate-templates/<env>/assimilate.yaml`)
 
 ```yaml
+assimilate-domain: monorepo          # required; names this repo in every generated file (see Ownership markers)
+
 git:
   github:                            # the key selects the provider (github or forgejo)
     repo: my-org/gitops
@@ -137,8 +164,9 @@ git:
    the server (delta), and run all builds concurrently — the image tag K is
    known before the build even starts.
 3. When everything is `done`, render the manifests and publish them under the
-   configured path of the GitOps repo: branch `assimilate/<env>-<timestamp>`,
-   commit listing every image, PR against the base branch.
+   configured path of the GitOps repo, pruning this domain's stale files:
+   branch `assimilate/<env>-<timestamp>`, commit listing every image, PR
+   against the base branch.
 4. Without `--rollout`: print the PR URL and stop. With `--rollout`:
    squash-merge the PR, delete the branch, then refresh + sync each
    configured ArgoCD application.

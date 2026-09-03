@@ -51,7 +51,7 @@ func newApp() *cli.App {
 				Flags: []cli.Flag{
 					&cli.BoolFlag{Name: "rollout", Usage: "merge the PR and trigger the ArgoCD refresh/sync"},
 					&cli.BoolFlag{Name: "plain", Usage: "plain line output even on a TTY"},
-					&cli.BoolFlag{Name: "force", Usage: "overwrite GitOps files that assimilate did not generate or that were edited since"},
+					&cli.BoolFlag{Name: "force", Usage: "overwrite GitOps files that assimilate did not generate, that were edited since, or that another assimilate-domain generated; prune edited stale files too"},
 				},
 				Action: deploy,
 			},
@@ -239,6 +239,7 @@ func deploy(c *cli.Context) error {
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	res, err := gitops.Publish(ctx, cfg.Git, gitTok, gitops.Change{
 		Env:     env,
+		Domain:  cfg.Domain,
 		Message: commitMessage(env, results),
 		Files:   files,
 		Force:   c.Bool("force"),

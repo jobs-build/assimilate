@@ -153,6 +153,7 @@ func TestLoadConfig(t *testing.T) {
 		yaml    string
 		want    spec.Config
 		wantErr string // substring of the error; "" = success
+		raw     bool   // yaml is complete as is: no assimilate-domain prepended
 	}{
 		{
 			name: "full",
@@ -169,6 +170,7 @@ argocd:
 			want: spec.Config{
 				Git:      spec.GitConfig{Type: "github", Repo: "fables-for-robots/gitops", Path: "clusters/staging", Branch: "main"},
 				Registry: "registry.example.com:5000",
+				Domain:   "mono",
 				ArgoCD: []spec.ArgoApp{
 					{Server: "https://argocd.example.com", Namespace: "argocd", Name: "my-app"},
 					{Server: "https://argocd.example.com", Name: "other"},
@@ -178,32 +180,32 @@ argocd:
 		{
 			name: "empty file defaults",
 			yaml: "",
-			want: spec.Config{Registry: "localhost:5000"},
+			want: spec.Config{Registry: "localhost:5000", Domain: "mono"},
 		},
 		{
 			name: "git absent is allowed",
 			yaml: "registry: r:5000\n",
-			want: spec.Config{Registry: "r:5000"},
+			want: spec.Config{Registry: "r:5000", Domain: "mono"},
 		},
 		{
 			name: "registry defaults with git",
 			yaml: "git:\n  github:\n    repo: a/b\n",
-			want: spec.Config{Git: spec.GitConfig{Type: "github", Repo: "a/b"}, Registry: "localhost:5000"},
+			want: spec.Config{Git: spec.GitConfig{Type: "github", Repo: "a/b"}, Registry: "localhost:5000", Domain: "mono"},
 		},
 		{
 			name: "path cleaned leading slash",
 			yaml: "git:\n  github:\n    repo: a/b\n    path: /clusters/staging/\n",
-			want: spec.Config{Git: spec.GitConfig{Type: "github", Repo: "a/b", Path: "clusters/staging"}, Registry: "localhost:5000"},
+			want: spec.Config{Git: spec.GitConfig{Type: "github", Repo: "a/b", Path: "clusters/staging"}, Registry: "localhost:5000", Domain: "mono"},
 		},
 		{
 			name: "path cleaned dot segments",
 			yaml: "git:\n  github:\n    repo: a/b\n    path: ./clusters//./staging\n",
-			want: spec.Config{Git: spec.GitConfig{Type: "github", Repo: "a/b", Path: "clusters/staging"}, Registry: "localhost:5000"},
+			want: spec.Config{Git: spec.GitConfig{Type: "github", Repo: "a/b", Path: "clusters/staging"}, Registry: "localhost:5000", Domain: "mono"},
 		},
 		{
 			name: "path dot is repo root",
 			yaml: "git:\n  github:\n    repo: a/b\n    path: .\n",
-			want: spec.Config{Git: spec.GitConfig{Type: "github", Repo: "a/b", Path: ""}, Registry: "localhost:5000"},
+			want: spec.Config{Git: spec.GitConfig{Type: "github", Repo: "a/b", Path: ""}, Registry: "localhost:5000", Domain: "mono"},
 		},
 		{
 			name:    "path escapes root",
@@ -262,12 +264,13 @@ argocd:
 			want: spec.Config{
 				Git:      spec.GitConfig{Type: "forgejo", URL: "https://git.example.com", Repo: "numtide/gitops", Path: "manifests/staging", Branch: "main"},
 				Registry: "localhost:5000",
+				Domain:   "mono",
 			},
 		},
 		{
 			name: "forgejo url trailing slash trimmed",
 			yaml: "git:\n  forgejo:\n    url: https://git.example.com/\n    repo: a/b\n",
-			want: spec.Config{Git: spec.GitConfig{Type: "forgejo", URL: "https://git.example.com", Repo: "a/b"}, Registry: "localhost:5000"},
+			want: spec.Config{Git: spec.GitConfig{Type: "forgejo", URL: "https://git.example.com", Repo: "a/b"}, Registry: "localhost:5000", Domain: "mono"},
 		},
 		{
 			name:    "forgejo url missing",
@@ -334,11 +337,39 @@ argocd:
 			yaml:    "git: github\n",
 			wantErr: "cannot unmarshal",
 		},
+		{
+			name:    "domain missing",
+			yaml:    "registry: r:5000\n",
+			raw:     true,
+			wantErr: "assimilate-domain is required",
+		},
+		{
+			name:    "domain blank",
+			yaml:    "assimilate-domain: \"  \"\n",
+			raw:     true,
+			wantErr: "assimilate-domain is required",
+		},
+		{
+			name:    "domain with whitespace",
+			yaml:    "assimilate-domain: my repo\n",
+			raw:     true,
+			wantErr: "assimilate-domain \"my repo\" must not contain whitespace",
+		},
+		{
+			name: "domain trimmed",
+			yaml: "assimilate-domain: \" mono \"\n",
+			raw:  true,
+			want: spec.Config{Registry: "localhost:5000", Domain: "mono"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			envDir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(envDir, ConfigFile), []byte(tt.yaml), 0o644); err != nil {
+			yaml := tt.yaml
+			if !tt.raw {
+				yaml = "assimilate-domain: mono\n" + yaml
+			}
+			if err := os.WriteFile(filepath.Join(envDir, ConfigFile), []byte(yaml), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			got, err := LoadConfig(envDir)
@@ -467,5 +498,60 @@ func TestParseArgoURL(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+// SuggestDomain names the source repository for a missing assimilate-domain:
+// the git root's directory name, extended by the project root's path below
+// it; without a git repository, the project root's own name.
+func TestSuggestDomain(t *testing.T) {
+	base := t.TempDir()
+	mk := func(rel string) string {
+		t.Helper()
+		p := filepath.Join(base, filepath.FromSlash(rel))
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	mk("monorepo/.git")
+	mk("monorepo/apps/shop/" + TemplatesDir)
+	mk("worktree/apps") // .git is a file in a git worktree
+	if err := os.WriteFile(filepath.Join(base, "worktree", ".git"), []byte("gitdir: /elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mk("plain/" + TemplatesDir)
+
+	for _, tc := range []struct {
+		name string
+		root string
+		want string
+	}{
+		{"project root is git root", filepath.Join(base, "monorepo"), "monorepo"},
+		{"project root below git root", filepath.Join(base, "monorepo", "apps", "shop"), "monorepo/apps/shop"},
+		{"git worktree", filepath.Join(base, "worktree", "apps"), "worktree/apps"},
+		{"no git", filepath.Join(base, "plain"), "plain"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SuggestDomain(tc.root); got != tc.want {
+				t.Fatalf("SuggestDomain(%s) = %q, want %q", tc.root, got, tc.want)
+			}
+		})
+	}
+}
+
+// A config without assimilate-domain fails with a suggestion derived from
+// the project root's place in its git repository.
+func TestLoadConfigMissingDomainSuggests(t *testing.T) {
+	root := mkTree(t, []string{".git"}, map[string]string{
+		"apps/shop/" + TemplatesDir + "/staging/" + ConfigFile: "git:\n  github:\n    repo: a/b\n",
+	})
+	_, err := LoadConfig(filepath.Join(root, "apps", "shop", TemplatesDir, "staging"))
+	if err == nil {
+		t.Fatal("no error")
+	}
+	want := "assimilate-domain: " + filepath.Base(root) + "/apps/shop"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q does not suggest %q", err, want)
 	}
 }
