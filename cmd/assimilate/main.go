@@ -52,6 +52,7 @@ func newApp() *cli.App {
 					&cli.BoolFlag{Name: "rollout", Usage: "merge the PR and trigger the ArgoCD refresh/sync"},
 					&cli.BoolFlag{Name: "plain", Usage: "plain line output even on a TTY"},
 					&cli.BoolFlag{Name: "force", Usage: "overwrite GitOps files that assimilate did not generate, that were edited since, or that another assimilate-domain generated; prune edited stale files too"},
+					&cli.StringFlag{Name: "adopt-legacy", Usage: "one-time migration: also prune stale files with pre-domain markers (assimilate ≤ 0.5) under `DIR` of the configured path (. for all of it) as this repo's"},
 				},
 				Action: deploy,
 			},
@@ -65,12 +66,18 @@ func newApp() *cli.App {
 	}
 }
 
+// valueFlags are the flags that take a value, which may follow as the next
+// token (`--adopt-legacy DIR`) rather than attached (`--adopt-legacy=DIR`).
+// reorderArgs must carry that token along with the flag.
+var valueFlags = map[string]bool{"--adopt-legacy": true}
+
 // reorderArgs stable-partitions the tokens after a known subcommand so
 // dash-prefixed flags precede positionals: urfave/cli v2 stops flag parsing
 // at the first positional, which would reject the documented
-// `assimilate deploy staging --rollout`. Safe only because every flag is
-// boolean (a flag never consumes the following token). A literal "--" and
-// everything after it are left untouched; a lone "-" is a positional.
+// `assimilate deploy staging --rollout`. Every flag is boolean except the
+// ones in valueFlags, whose separate value token moves with them. A literal
+// "--" and everything after it are left untouched; a lone "-" is a
+// positional.
 func reorderArgs(args []string) []string {
 	if len(args) < 3 {
 		return args
@@ -83,17 +90,37 @@ func reorderArgs(args []string) []string {
 	out := append(make([]string, 0, len(args)), args[0], args[1])
 	rest := args[2:]
 	var flags, pos []string
-	for i, a := range rest {
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
 		if a == "--" {
 			return append(append(append(out, flags...), pos...), rest[i:]...)
 		}
-		if len(a) > 1 && a[0] == '-' {
+		switch {
+		case valueFlags[a] && i+1 < len(rest):
+			flags = append(flags, a, rest[i+1])
+			i++
+		case len(a) > 1 && a[0] == '-':
 			flags = append(flags, a)
-		} else {
+		default:
 			pos = append(pos, a)
 		}
 	}
 	return append(append(out, flags...), pos...)
+}
+
+// parseAdoptDir validates the --adopt-legacy value into a subtree of the
+// configured GitOps path: "" for the whole path (given as "." or "/"),
+// otherwise the cleaned relative directory. Empty and escaping values are
+// errors.
+func parseAdoptDir(raw string) (string, error) {
+	if raw == "" {
+		return "", errors.New("--adopt-legacy requires a directory under the configured GitOps path (. for all of it)")
+	}
+	dir, err := project.CleanRepoPath(raw)
+	if err != nil {
+		return "", fmt.Errorf("--adopt-legacy: %w", err)
+	}
+	return dir, nil
 }
 
 // signalContext returns a ctx cancelled on the first SIGINT/SIGTERM. The
@@ -148,9 +175,17 @@ func deploy(c *cli.Context) error {
 	env := c.Args().First()
 	rollout := c.Bool("rollout")
 
-	// Preflight every credential before any build starts.
+	// Preflight every credential and flag before any build starts.
 	if cfg.Git.Type == "" {
 		return errors.New("no git repo configured in assimilate.yaml")
+	}
+	var adoptLegacy bool
+	var adoptDir string
+	if c.IsSet("adopt-legacy") {
+		if adoptDir, err = parseAdoptDir(c.String("adopt-legacy")); err != nil {
+			return err
+		}
+		adoptLegacy = true
 	}
 	gitTok, err := gitToken(c.Context, cfg.Git)
 	if err != nil {
@@ -238,11 +273,13 @@ func deploy(c *cli.Context) error {
 
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	res, err := gitops.Publish(ctx, cfg.Git, gitTok, gitops.Change{
-		Env:     env,
-		Domain:  cfg.Domain,
-		Message: commitMessage(env, results),
-		Files:   files,
-		Force:   c.Bool("force"),
+		Env:         env,
+		Domain:      cfg.Domain,
+		Message:     commitMessage(env, results),
+		Files:       files,
+		Force:       c.Bool("force"),
+		AdoptLegacy: adoptLegacy,
+		AdoptDir:    adoptDir,
 	}, rollout, logf)
 	if err != nil {
 		return err

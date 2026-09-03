@@ -56,6 +56,21 @@ func TestReorderArgs(t *testing.T) {
 			in:   []string{"assimilate"},
 			want: []string{"assimilate"},
 		},
+		{
+			name: "value flag keeps its separate value",
+			in:   []string{"assimilate", "deploy", "staging", "--adopt-legacy", "manifests/hoodi"},
+			want: []string{"assimilate", "deploy", "--adopt-legacy", "manifests/hoodi", "staging"},
+		},
+		{
+			name: "value flag in equals form",
+			in:   []string{"assimilate", "deploy", "staging", "--adopt-legacy=.", "--rollout"},
+			want: []string{"assimilate", "deploy", "--adopt-legacy=.", "--rollout", "staging"},
+		},
+		{
+			name: "value flag missing its value at the end",
+			in:   []string{"assimilate", "deploy", "staging", "--adopt-legacy"},
+			want: []string{"assimilate", "deploy", "--adopt-legacy", "staging"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := reorderArgs(tc.in); !slices.Equal(got, tc.want) {
@@ -290,4 +305,36 @@ func TestGitToken(t *testing.T) {
 			t.Fatalf("got %q, %v; want gh-tok, nil", got, err)
 		}
 	})
+}
+
+// parseAdoptDir turns the --adopt-legacy value into a cfg.Path-relative
+// subtree: "." (or a slash) is the whole path (""), other values are
+// cleaned; empty and escaping values are errors.
+func TestParseAdoptDir(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    string
+		wantErr string
+	}{
+		{in: ".", want: ""},
+		{in: "/", want: ""},
+		{in: "manifests/hoodi", want: "manifests/hoodi"},
+		{in: "/manifests/hoodi/", want: "manifests/hoodi"},
+		{in: "./manifests//hoodi", want: "manifests/hoodi"},
+		{in: "", wantErr: "requires a directory"},
+		{in: "../other", wantErr: "escapes"},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := parseAdoptDir(tc.in)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("parseAdoptDir(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+			}
+		})
+	}
 }

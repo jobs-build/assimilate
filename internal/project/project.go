@@ -187,7 +187,7 @@ func gitConfig(g *gitSection) (spec.GitConfig, error) {
 		if err := checkRepo(gh.Repo); err != nil {
 			return spec.GitConfig{}, fmt.Errorf("git.github.repo: %w", err)
 		}
-		cleaned, err := cleanRepoPath(gh.Path)
+		cleaned, err := CleanRepoPath(gh.Path)
 		if err != nil {
 			return spec.GitConfig{}, fmt.Errorf("git.github.path: %w", err)
 		}
@@ -201,7 +201,7 @@ func gitConfig(g *gitSection) (spec.GitConfig, error) {
 		if err := checkRepo(fj.Repo); err != nil {
 			return spec.GitConfig{}, fmt.Errorf("git.forgejo.repo: %w", err)
 		}
-		cleaned, err := cleanRepoPath(fj.Path)
+		cleaned, err := CleanRepoPath(fj.Path)
 		if err != nil {
 			return spec.GitConfig{}, fmt.Errorf("git.forgejo.path: %w", err)
 		}
@@ -240,9 +240,9 @@ func checkRepo(repo string) error {
 	return nil
 }
 
-// cleanRepoPath normalizes a repo-relative directory: slash-cleaned, no
+// CleanRepoPath normalizes a repo-relative directory: slash-cleaned, no
 // leading slash, "" for the repo root; paths escaping the root are errors.
-func cleanRepoPath(p string) (string, error) {
+func CleanRepoPath(p string) (string, error) {
 	if p == "" {
 		return "", nil
 	}
