@@ -107,6 +107,10 @@ type Config struct {
 	Git      GitConfig
 	Registry string // image ref host prefix; default "localhost:5000"
 	ArgoCD   []ArgoApp
+	// Domain is the mandatory assimilate-domain: the name of this source
+	// repository, recorded in every generated file so pruning in a shared
+	// GitOps directory only ever touches this repository's own files.
+	Domain string
 }
 
 // GitConfig describes the GitOps repository to publish rendered manifests to.

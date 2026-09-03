@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -85,6 +86,7 @@ func listEnvs(templatesDir string) []string {
 // fileConfig mirrors assimilate.yaml exactly; KnownFields(true) turns any
 // key outside this schema into a parse error.
 type fileConfig struct {
+	Domain   string      `yaml:"assimilate-domain"`
 	Git      *gitSection `yaml:"git"`
 	Registry string      `yaml:"registry"`
 	ArgoCD   []argoEntry `yaml:"argocd"`
@@ -116,12 +118,14 @@ type argoEntry struct {
 
 // LoadConfig reads and validates <envDir>/assimilate.yaml.
 //
-// Schema (see docs/design.md): a `git` mapping with exactly one provider key
-// (`github` or `forgejo`) carrying repo (owner/name), path, optional branch,
-// and — forgejo only — the instance base url; an optional `registry` (default
-// localhost:5000); an optional `argocd` list of {url: <application URL>}
-// entries parsed by ParseArgoURL. Unknown top level or provider keys are
-// errors.
+// Schema (see docs/design.md): a mandatory `assimilate-domain` (a single
+// whitespace-free token naming this source repository — a missing one is
+// reported with a suggestion from SuggestDomain); a `git` mapping with
+// exactly one provider key (`github` or `forgejo`) carrying repo
+// (owner/name), path, optional branch, and — forgejo only — the instance
+// base url; an optional `registry` (default localhost:5000); an optional
+// `argocd` list of {url: <application URL>} entries parsed by ParseArgoURL.
+// Unknown top level or provider keys are errors.
 func LoadConfig(envDir string) (spec.Config, error) {
 	file := filepath.Join(envDir, ConfigFile)
 	data, err := os.ReadFile(file)
@@ -135,7 +139,19 @@ func LoadConfig(envDir string) (spec.Config, error) {
 		return spec.Config{}, fmt.Errorf("%s: %w", file, err)
 	}
 
-	cfg := spec.Config{Registry: fc.Registry}
+	domain := strings.TrimSpace(fc.Domain)
+	if domain == "" {
+		root := filepath.Dir(filepath.Dir(envDir)) // <root>/assimilate-templates/<env>
+		return spec.Config{}, fmt.Errorf("%s: assimilate-domain is required\n"+
+			"  it names this repository in every generated file, so pruning in the GitOps repo\n"+
+			"  only ever touches this repository's own files; add e.g.\n"+
+			"    assimilate-domain: %s", file, SuggestDomain(root))
+	}
+	if strings.IndexFunc(domain, unicode.IsSpace) >= 0 {
+		return spec.Config{}, fmt.Errorf("%s: assimilate-domain %q must not contain whitespace", file, domain)
+	}
+
+	cfg := spec.Config{Registry: fc.Registry, Domain: domain}
 	if cfg.Registry == "" {
 		cfg.Registry = defaultRegistry
 	}
@@ -286,4 +302,31 @@ func ParseArgoURL(raw string) (spec.ArgoApp, error) {
 		app.Namespace, app.Name = rest[0], rest[1]
 	}
 	return app, nil
+}
+
+// SuggestDomain proposes an assimilate-domain for the project rooted at
+// root: the name of the enclosing git repository's directory (the nearest
+// ancestor holding a .git entry, root itself included), extended by root's
+// slash path below it when the project is not the repository root. Outside
+// any git repository, root's own directory name.
+func SuggestDomain(root string) string {
+	root = filepath.Clean(root)
+	for dir := root; ; {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			if dir == root {
+				return filepath.Base(dir)
+			}
+			rel, err := filepath.Rel(dir, root)
+			if err != nil {
+				break
+			}
+			return filepath.Base(dir) + "/" + filepath.ToSlash(rel)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return filepath.Base(root)
 }

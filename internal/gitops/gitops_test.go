@@ -22,11 +22,19 @@ import (
 	"github.com/jobs-build/assimilate/internal/spec"
 )
 
-// marked returns body as ownership.WriteMarked stores a YAML file: the hash
-// marker line followed by the body.
-func marked(body string) string {
-	return ownership.MarkerPrefix + ownership.ComputeBodyHash("x.yaml", []byte(body)) + "\n" + body
+// markedAs returns body as ownership.WriteMarked stores a YAML file for
+// domain: the hash line, the domain line (omitted for "", the pre-domain
+// format) and the body.
+func markedAs(domain, body string) string {
+	hdr := ownership.MarkerPrefix + ownership.ComputeBodyHash("x.yaml", []byte(body)) + "\n"
+	if domain != "" {
+		hdr += ownership.DomainPrefix + domain + "\n"
+	}
+	return hdr + body
 }
+
+// marked is markedAs for testChange's domain.
+func marked(body string) string { return markedAs("mono", body) }
 
 var testStamp = time.Date(2026, 7, 24, 12, 30, 45, 0, time.UTC)
 
@@ -172,6 +180,7 @@ func branchNames(t *testing.T, bare string) []string {
 func testChange() Change {
 	return Change{
 		Env:     "staging",
+		Domain:  "mono",
 		Message: "assimilate: deploy staging\n\nbackend → localhost:5000/jobs:abc\n",
 		Files: map[string][]byte{
 			"api.yaml":           []byte("kind: Deployment\nimage: new\n"),
@@ -217,7 +226,7 @@ func TestPushBranch(t *testing.T) {
 			for path, want := range map[string]string{
 				"clusters/staging/api.yaml":           marked(string(ch.Files["api.yaml"])),
 				"clusters/staging/workers/queue.yaml": marked(string(ch.Files["workers/queue.yaml"])),
-				"clusters/staging/keep.yaml":          "stray\n", // strays are never pruned
+				"clusters/staging/keep.yaml":          "stray\n", // unmarked strays are never pruned
 				"README.md":                           "hi\n",    // files outside cfg.Path untouched
 			} {
 				if got := files[path]; got != want {
@@ -358,7 +367,8 @@ func TestPushBranchOwnershipConflicts(t *testing.T) {
 func TestPushBranchJSONSidecar(t *testing.T) {
 	body := `{"replicas": 2}` + "\n"
 	hash := ownership.ComputeBodyHash("x.json", []byte(body))
-	ch := Change{Env: "staging", Message: "m", Files: map[string][]byte{"config.json": []byte(body)}}
+	sidecar := ownership.MarkerPrefix + hash + "\n" + ownership.DomainPrefix + "mono\n"
+	ch := Change{Env: "staging", Domain: "mono", Message: "m", Files: map[string][]byte{"config.json": []byte(body)}}
 	cfg := spec.GitConfig{Type: "github", Repo: "acme/gitops", Path: "clusters/staging", Branch: "main"}
 
 	upstream := seedUpstream(t, map[string]string{"README.md": "hi\n"})
@@ -371,14 +381,14 @@ func TestPushBranchJSONSidecar(t *testing.T) {
 	if got := files["clusters/staging/config.json"]; got != body {
 		t.Errorf("config.json = %q, want %q", got, body)
 	}
-	if got := files["clusters/staging/config.json"+ownership.SidecarExt]; got != hash+"\n" {
-		t.Errorf("sidecar = %q, want %q", got, hash+"\n")
+	if got := files["clusters/staging/config.json"+ownership.SidecarExt]; got != sidecar {
+		t.Errorf("sidecar = %q, want %q", got, sidecar)
 	}
 
 	t.Run("identical content is no-change", func(t *testing.T) {
 		upstream := seedUpstream(t, map[string]string{
 			"clusters/staging/config.json":                        body,
-			"clusters/staging/config.json" + ownership.SidecarExt: hash + "\n",
+			"clusters/staging/config.json" + ownership.SidecarExt: sidecar,
 		})
 		stubGit(t, upstream)
 		_, noChanges, err := pushBranch(context.Background(), cfg, "", ch, discard)
@@ -387,6 +397,23 @@ func TestPushBranchJSONSidecar(t *testing.T) {
 		}
 		if !noChanges {
 			t.Error("expected noChanges")
+		}
+	})
+
+	// A sidecar from before domains (the bare hash) still proves ownership;
+	// the re-publish upgrades it to the header format.
+	t.Run("legacy sidecar adopted", func(t *testing.T) {
+		upstream := seedUpstream(t, map[string]string{
+			"clusters/staging/config.json":                        body,
+			"clusters/staging/config.json" + ownership.SidecarExt: hash + "\n",
+		})
+		stubGit(t, upstream)
+		branch, noChanges, err := pushBranch(context.Background(), cfg, "", ch, discard)
+		if err != nil || noChanges {
+			t.Fatalf("noChanges=%v err=%v", noChanges, err)
+		}
+		if _, files := branchTip(t, upstream, branch); files["clusters/staging/config.json"+ownership.SidecarExt] != sidecar {
+			t.Errorf("sidecar not upgraded: %q", files["clusters/staging/config.json"+ownership.SidecarExt])
 		}
 	})
 
@@ -952,5 +979,209 @@ func TestGitAuth(t *testing.T) {
 		if got := gitAuth(tc.url, tc.token) != nil; got != tc.want {
 			t.Errorf("gitAuth(%q, %q) auth=%v, want %v", tc.url, tc.token, got, tc.want)
 		}
+	}
+}
+
+// Files under cfg.Path that assimilate generated for this domain but no
+// longer renders are pruned (JSON together with its sidecar); files of
+// another domain, pre-domain markers, unmarked files, other extensions and
+// anything outside cfg.Path stay. Pruning alone is a change worth a commit.
+func TestPushBranchPrunes(t *testing.T) {
+	ch := testChange()
+	jsonBody := `{"a":1}` + "\n"
+	jsonSidecar := ownership.MarkerPrefix + ownership.ComputeBodyHash("x.json", []byte(jsonBody)) + "\n" + ownership.DomainPrefix + "mono\n"
+	seed := map[string]string{
+		"clusters/staging/api.yaml":                               marked(string(ch.Files["api.yaml"])),
+		"clusters/staging/workers/queue.yaml":                     marked(string(ch.Files["workers/queue.yaml"])),
+		"clusters/staging/old.yaml":                               marked("kind: Gone\n"),
+		"clusters/staging/workers/old.yml":                        marked("kind: Gone\n"),
+		"clusters/staging/old/config.json":                        jsonBody,
+		"clusters/staging/old/config.json" + ownership.SidecarExt: jsonSidecar,
+		"clusters/staging/other.yaml":                             markedAs("other", "kind: Theirs\n"),
+		"clusters/staging/legacy.yaml":                            markedAs("", "kind: Legacy\n"),
+		"clusters/staging/hand.yaml":                              "kind: Handwritten\n",
+		"clusters/staging/notes.txt":                              "notes\n",
+		"clusters/prod/old.yaml":                                  marked("kind: Prod\n"),
+	}
+	upstream := seedUpstream(t, seed)
+	stubGit(t, upstream)
+	cfg := spec.GitConfig{Type: "github", Repo: "acme/gitops", Path: "clusters/staging", Branch: "main"}
+
+	var logs []string
+	branch, noChanges, err := pushBranch(context.Background(), cfg, "", ch, func(s string) { logs = append(logs, s) })
+	if err != nil || noChanges {
+		t.Fatalf("noChanges=%v err=%v", noChanges, err)
+	}
+	_, files := branchTip(t, upstream, branch)
+	for _, gone := range []string{
+		"clusters/staging/old.yaml",
+		"clusters/staging/workers/old.yml",
+		"clusters/staging/old/config.json",
+		"clusters/staging/old/config.json" + ownership.SidecarExt,
+	} {
+		if _, ok := files[gone]; ok {
+			t.Errorf("%s not pruned", gone)
+		}
+	}
+	for _, kept := range []string{
+		"clusters/staging/api.yaml",
+		"clusters/staging/workers/queue.yaml",
+		"clusters/staging/other.yaml",
+		"clusters/staging/legacy.yaml",
+		"clusters/staging/hand.yaml",
+		"clusters/staging/notes.txt",
+		"clusters/prod/old.yaml",
+		".seed",
+	} {
+		if _, ok := files[kept]; !ok {
+			t.Errorf("%s wrongly pruned", kept)
+		}
+	}
+	joined := strings.Join(logs, "\n")
+	for _, want := range []string{
+		"pruning clusters/staging/old.yaml",
+		"pruning clusters/staging/workers/old.yml",
+		"pruning clusters/staging/old/config.json",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("logs %q missing %q", logs, want)
+		}
+	}
+	if strings.Contains(joined, "other.yaml") || strings.Contains(joined, "legacy.yaml") {
+		t.Errorf("logs mention files that must not be pruned: %q", logs)
+	}
+}
+
+// With cfg.Path at the repository root the prune walk must skip .git.
+func TestPushBranchPrunesAtRepoRoot(t *testing.T) {
+	ch := testChange()
+	upstream := seedUpstream(t, map[string]string{
+		"README.md": "hi\n",
+		"old.yaml":  marked("kind: Gone\n"),
+	})
+	stubGit(t, upstream)
+	cfg := spec.GitConfig{Type: "github", Repo: "acme/gitops", Path: "", Branch: "main"}
+
+	branch, noChanges, err := pushBranch(context.Background(), cfg, "", ch, discard)
+	if err != nil || noChanges {
+		t.Fatalf("noChanges=%v err=%v", noChanges, err)
+	}
+	_, files := branchTip(t, upstream, branch)
+	if _, ok := files["old.yaml"]; ok {
+		t.Error("old.yaml not pruned")
+	}
+	for _, kept := range []string{"README.md", ".seed", "api.yaml", "workers/queue.yaml"} {
+		if _, ok := files[kept]; !ok {
+			t.Errorf("%s missing", kept)
+		}
+	}
+}
+
+// A stale file of this domain that was edited since assimilate generated it
+// is a conflict like an edited target: listed, refused without Force, and
+// pruned with Force.
+func TestPushBranchPruneEditedConflict(t *testing.T) {
+	edited := ownership.MarkerPrefix + ownership.ComputeBodyHash("x.yaml", []byte("original\n")) + "\n" + ownership.DomainPrefix + "mono\nedited by hand\n"
+	seed := map[string]string{"clusters/staging/old.yaml": edited}
+	cfg := spec.GitConfig{Type: "github", Repo: "acme/gitops", Path: "clusters/staging", Branch: "main"}
+
+	t.Run("without force", func(t *testing.T) {
+		upstream := seedUpstream(t, seed)
+		stubGit(t, upstream)
+		_, _, err := pushBranch(context.Background(), cfg, "", testChange(), discard)
+		if err == nil {
+			t.Fatal("no error")
+		}
+		for _, want := range []string{"clusters/staging/old.yaml: edited since assimilate generated it", "--force"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+		for _, name := range branchNames(t, upstream) {
+			if strings.HasPrefix(name, "assimilate/") {
+				t.Errorf("branch %s pushed despite conflicts", name)
+			}
+		}
+	})
+
+	t.Run("with force", func(t *testing.T) {
+		upstream := seedUpstream(t, seed)
+		stubGit(t, upstream)
+		ch := testChange()
+		ch.Force = true
+		var logs []string
+		branch, noChanges, err := pushBranch(context.Background(), cfg, "", ch, func(s string) { logs = append(logs, s) })
+		if err != nil || noChanges {
+			t.Fatalf("noChanges=%v err=%v", noChanges, err)
+		}
+		if _, files := branchTip(t, upstream, branch); files["clusters/staging/old.yaml"] != "" {
+			t.Error("old.yaml not pruned")
+		}
+		if want := "pruning clusters/staging/old.yaml (edited since assimilate generated it)"; !strings.Contains(strings.Join(logs, "\n"), want) {
+			t.Errorf("logs %q missing %q", logs, want)
+		}
+	})
+}
+
+// A target generated by another domain is a conflict: two source repos
+// rendering the same path must not silently steal it from each other.
+func TestPushBranchForeignDomainConflict(t *testing.T) {
+	seed := map[string]string{"clusters/staging/api.yaml": markedAs("other", "kind: Theirs\n")}
+	cfg := spec.GitConfig{Type: "github", Repo: "acme/gitops", Path: "clusters/staging", Branch: "main"}
+
+	t.Run("without force", func(t *testing.T) {
+		upstream := seedUpstream(t, seed)
+		stubGit(t, upstream)
+		_, _, err := pushBranch(context.Background(), cfg, "", testChange(), discard)
+		if err == nil {
+			t.Fatal("no error")
+		}
+		for _, want := range []string{`clusters/staging/api.yaml: generated by assimilate-domain "other"`, "--force"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+	})
+
+	t.Run("with force", func(t *testing.T) {
+		upstream := seedUpstream(t, seed)
+		stubGit(t, upstream)
+		ch := testChange()
+		ch.Force = true
+		var logs []string
+		branch, _, err := pushBranch(context.Background(), cfg, "", ch, func(s string) { logs = append(logs, s) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, files := branchTip(t, upstream, branch); files["clusters/staging/api.yaml"] != marked(string(ch.Files["api.yaml"])) {
+			t.Errorf("api.yaml = %q", files["clusters/staging/api.yaml"])
+		}
+		if want := `overwriting clusters/staging/api.yaml (generated by assimilate-domain "other")`; !strings.Contains(strings.Join(logs, "\n"), want) {
+			t.Errorf("logs %q missing %q", logs, want)
+		}
+	})
+}
+
+// A target with a pre-domain marker is adopted: no conflict, and the
+// re-publish stamps it with the domain even when the body is unchanged.
+func TestPushBranchAdoptsLegacyMarker(t *testing.T) {
+	ch := testChange()
+	upstream := seedUpstream(t, map[string]string{
+		"clusters/staging/api.yaml":           markedAs("", string(ch.Files["api.yaml"])),
+		"clusters/staging/workers/queue.yaml": markedAs("", string(ch.Files["workers/queue.yaml"])),
+	})
+	stubGit(t, upstream)
+	cfg := spec.GitConfig{Type: "github", Repo: "acme/gitops", Path: "clusters/staging", Branch: "main"}
+
+	var logs []string
+	branch, noChanges, err := pushBranch(context.Background(), cfg, "", ch, func(s string) { logs = append(logs, s) })
+	if err != nil || noChanges {
+		t.Fatalf("noChanges=%v err=%v", noChanges, err)
+	}
+	if _, files := branchTip(t, upstream, branch); files["clusters/staging/api.yaml"] != marked(string(ch.Files["api.yaml"])) {
+		t.Errorf("api.yaml = %q", files["clusters/staging/api.yaml"])
+	}
+	if joined := strings.Join(logs, "\n"); strings.Contains(joined, "overwriting") {
+		t.Errorf("legacy adoption logged as overwrite: %q", logs)
 	}
 }
