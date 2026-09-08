@@ -6,7 +6,7 @@ buildGoModule {
 
   src = lib.cleanSource ./.;
 
-  vendorHash = "sha256-BK0P/yFvB5vof8tqHVXpDcFWmCBQtJkpFre9dRHu6d0=";
+  vendorHash = "sha256-xEznzFvJtjy7G4wL1Uc/uokhkmFlVS/blNtFLsEKQWQ=";
 
   subPackages = [ "cmd/assimilate" ];
 
