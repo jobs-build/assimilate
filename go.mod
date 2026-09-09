@@ -14,7 +14,7 @@ require (
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/gofrs/flock v0.13.0
 	github.com/google/go-github/v73 v73.0.0
-	github.com/jobs-build/jobs-iroh v0.34.0
+	github.com/jobs-build/jobs-iroh v0.35.0
 	github.com/tmc/go-iroh v0.2.0
 	github.com/urfave/cli/v2 v2.27.7
 	golang.org/x/oauth2 v0.36.0

@@ -147,8 +147,8 @@ github.com/hashicorp/go-version v1.7.0 h1:5tqGy27NaOTB8yJKUZELlFAS/LTKJkrmONwQKe
 github.com/hashicorp/go-version v1.7.0/go.mod h1:fltr4n8CU8Ke44wwGCBoEymUuxUHl09ZGVZPK5anwXA=
 github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 h1:BQSFePA1RWJOlocH6Fxy8MmwDt+yVQYULKfN0RoTN8A=
 github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99/go.mod h1:1lJo3i6rXxKeerYnT8Nvf0QmHCRC1n8sfWVwXF2Frvo=
-github.com/jobs-build/jobs-iroh v0.34.0 h1:/+VuT+ghXcYYvT8E8dLFzvzmTSN6UOFbqYkBbpI4pns=
-github.com/jobs-build/jobs-iroh v0.34.0/go.mod h1:O5x3D9KN1FQMZV8rdhiEq9lPj5YD4AwnpyMiK//H3nY=
+github.com/jobs-build/jobs-iroh v0.35.0 h1:x3YfG9u70h8cVSDCKnCLgux0jwhHhdEWNlWuLr033Ss=
+github.com/jobs-build/jobs-iroh v0.35.0/go.mod h1:O5x3D9KN1FQMZV8rdhiEq9lPj5YD4AwnpyMiK//H3nY=
 github.com/kevinburke/ssh_config v1.2.0 h1:x584FjTGwHzMwvHx18PXxbBVzfnxogHaAReU4gf13a4=
 github.com/kevinburke/ssh_config v1.2.0/go.mod h1:CT57kijsi8u/K/BOFA39wgDQJ9CxiF4nAY/ojJ6r6mM=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
