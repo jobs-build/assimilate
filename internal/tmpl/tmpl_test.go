@@ -833,3 +833,68 @@ func TestScanPathDotDotRejected(t *testing.T) {
 		})
 	}
 }
+func TestSourcesDecoding(t *testing.T) {
+	image := func(body string) string {
+		return "spec:\n  containers:\n    - name: api\n      image:\n        type: jobs-build\n        platform: linux/amd64\n" + body
+	}
+	scanOne := func(t *testing.T, content string) (spec.BuildSpec, error) {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "a.yaml"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		x, err := Scan(dir)
+		if err != nil {
+			return spec.BuildSpec{}, err
+		}
+		if len(x.Builds) != 1 {
+			t.Fatalf("%d builds, want 1", len(x.Builds))
+		}
+		return x.Builds[0], nil
+	}
+
+	t.Run("normalized", func(t *testing.T) {
+		got, err := scanOne(t, image("        path: services/api\n        sources:\n          - proto\n          - /lib/\n          - ./proto\n          - /lib/sub\n          - services/api/gen\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"/lib", "/proto"}; !reflect.DeepEqual(got.Sources, want) {
+			t.Errorf("Sources = %v, want %v", got.Sources, want)
+		}
+	})
+	t.Run("absent and empty mean none", func(t *testing.T) {
+		for _, body := range []string{"        path: /services/api\n", "        path: /services/api\n        sources: []\n"} {
+			got, err := scanOne(t, image(body))
+			if err != nil || got.Sources != nil {
+				t.Errorf("Sources = %v, %v; want nil", got.Sources, err)
+			}
+		}
+	})
+	t.Run("flow style and key order", func(t *testing.T) {
+		got, err := scanOne(t, image("        sources: [/proto]\n        path: /services/api\n"))
+		if err != nil || !reflect.DeepEqual(got.Sources, []string{"/proto"}) {
+			t.Errorf("Sources = %v, %v", got.Sources, err)
+		}
+	})
+
+	for name, tt := range map[string]struct{ body, want string }{
+		"not a list":       {"        path: /services/api\n        sources: /proto\n", "sources must be a list of paths"},
+		"a mapping entry":  {"        path: /services/api\n        sources:\n          - a: b\n", "sources entries must be non-empty strings"},
+		"an empty entry":   {"        path: /services/api\n        sources:\n          - \"\"\n", "sources entries must be non-empty strings"},
+		"a number":         {"        path: /services/api\n        sources:\n          - 42\n", "sources entries must be non-empty strings"},
+		"a null":           {"        path: /services/api\n        sources:\n          - ~\n", "sources entries must be non-empty strings"},
+		"a boolean":        {"        path: /services/api\n        sources: [true]\n", "sources entries must be non-empty strings"},
+		"dot-dot":          {"        path: /services/api\n        sources:\n          - ../other\n", `sources must not contain ".."`},
+		"the project root": {"        path: /services/api\n        sources:\n          - /\n", "sources must not name the project root"},
+		"on a root build":  {"        sources:\n          - /proto\n", "sources is not allowed on a root build"},
+		"root build path":  {"        path: /\n        sources: [proto]\n", "sources is not allowed on a root build"},
+		"duplicate key":    {"        path: /services/api\n        sources: [/a]\n        sources: [/b]\n", `duplicate key "sources"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := scanOne(t, image(tt.body))
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "a.yaml:") {
+				t.Errorf("err = %v, want one naming the file and %q", err, tt.want)
+			}
+		})
+	}
+}

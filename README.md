@@ -56,6 +56,8 @@ containers:
       type: jobs-build
       name: api              # optional; display name in the TUI
       path: /services/api    # source dir relative to the repo root (default "/")
+      sources:               # optional; other repo paths the build may reference
+        - /proto
       build-file: BUILD.prod # optional; recipe path (default BUILD.jobs)
       args:                  # optional; jobs build params (--param key=value)
         variant: slim
@@ -77,8 +79,80 @@ step in CI; registry manifest digests are unaffected, only tags churn).
 
 Exclusions come from `.amberignore` files at or below the build path — put a
 `.amberignore` inside each build path; one at the monorepo root is not
-consulted for subtree builds. Don't define jobs-build image objects via YAML
-anchors/aliases or `<<` merge keys — the template scanner rejects them.
+consulted for subtree builds (it is for images with `sources`, below). Don't
+define jobs-build image objects via YAML anchors/aliases or `<<` merge keys —
+the template scanner rejects them.
+
+### Sharing source between images: `sources`
+
+Without `sources` a build sees its `path` and nothing else. `sources` lists
+the other repo paths — files or directories, written like `path` — that the
+build may reference:
+
+```yaml
+image:
+  type: jobs-build
+  path: /services/api
+  sources:
+    - /proto
+  platform: linux/amd64
+```
+
+assimilate then hands the server the repo pruned to `path` plus `sources`,
+laid out as in the repo, with `path` as the build directory.
+
+`sources` makes those paths *available*; the recipe decides what the build
+*uses*. jobs-iroh puts into the build what the recipe covers: its own
+directory (or the `closure=` it returns), the `sources=` it declares, and
+what its plugins contribute. So the recipe has to name the sibling as well —
+`sources = ["//proto"]` on the `build()` return — or use a plugin that finds
+it: plugin-go, given `go_mod=` and `go_closure=`, follows relative `replace`
+directives into sibling modules. Covered paths keep their repo layout, so
+relative references between them resolve as in your checkout: a Go
+`replace … => ../../proto`, a cargo path dependency, a shared proto
+directory. A path listed here that the recipe does not cover is simply
+absent from the build.
+
+- Entries are cleaned and normalized: duplicates, entries inside `path` and
+  entries inside another entry are dropped. `..` and `/` are errors, and so
+  is `sources` on a root build (`path: /` already covers the repo).
+- Every listed path must exist and must not be excluded by an `.amberignore`;
+  otherwise the run stops before any build, naming the path.
+- A path the recipe needs but the template does not list fails that build,
+  naming the path. Listing more than needed only costs a new tag when those
+  paths change.
+- Symlinks are not followed out of the listed paths: a link inside a covered
+  directory whose target is elsewhere in the repo stays dangling in the build
+  (the server warns) — list the target. An absolute link, or one that leaves
+  the repo, inside a covered directory fails the build.
+- `path` must be a real directory of the repo, not a symlink to one.
+
+What the tag K depends on:
+
+| | without `sources` | with `sources` |
+|---|---|---|
+| content and modes under `path` | yes | yes |
+| content and modes under each source | — | yes |
+| anything else in the repo | no | no |
+| mtime, uid, gid | yes | no |
+
+So a tag with `sources` is the same on a fresh clone of the same commit
+(given the same file modes, and no untracked, un-ignored files under the
+listed paths); the mtime caveat above applies only to images without it.
+Adding `sources` to an image changes its tag once. Images without `sources`
+are built exactly as before.
+
+With any `sources` image, a run ingests the whole repo once into assimilate's
+local store (only the pruned tree is pushed): keep large untracked
+directories out with a `.amberignore` at the repo root (`.git` is always
+skipped). A file anywhere in the repo that cannot be read — or a socket or
+fifo — fails every `sources` image, naming the file; ignore it. Files above
+the listed paths (`go.work`, a workspace `Cargo.toml`) are part of the build
+only if listed: a source can be a single file.
+
+The server must be jobs-iroh v0.11.0 or later (v0.12.0 if the recipe returns
+`closure=`); an older one rejects the build at submit ("definition is not
+canonical CBOR").
 
 Files without substitutions are copied byte-identical; substituted files keep
 their comments.

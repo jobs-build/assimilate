@@ -4,10 +4,13 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jobs-build/jobs-iroh/builddef"
 	"github.com/jobs-build/jobs-iroh/wire"
 
 	"github.com/jobs-build/assimilate/internal/spec"
@@ -176,5 +179,280 @@ func writeFile(t *testing.T, dir, rel, content string) {
 	}
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// project lays out a small monorepo and returns its root.
+func project(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	writeFile(t, root, "services/a/BUILD.jobs", "# recipe\n")
+	writeFile(t, root, "services/a/main.go", "package main\n")
+	writeFile(t, root, "lib/x.go", "package lib\n")
+	writeFile(t, root, "other/y.txt", "y\n")
+	return root
+}
+
+// keyOf computes K of s over root with a fresh store, as one assimilate run
+// would.
+func keyOf(t *testing.T, root string, s spec.BuildSpec) string {
+	t.Helper()
+	l, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	src, err := l.SourceFor(context.Background(), root, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := l.DefinitionKey(src, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+func TestSourceForWithoutSourcesIsTheSubtree(t *testing.T) {
+	ctx := context.Background()
+	root := project(t)
+	l, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	s := spec.BuildSpec{Path: "/services/a", Platform: "linux/amd64"}
+	src, err := l.SourceFor(ctx, root, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subtree, err := l.Ingest(ctx, filepath.Join(root, "services", "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src.String() != subtree.String() {
+		t.Fatalf("source %s, want the subtree ingest %s", src, subtree)
+	}
+
+	// The definition is what it always was: the subtree as the build root,
+	// no Dir, no Ctx.
+	in, err := builddef.TreeInput(src.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := canonicalParams(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := builddef.Definition{Source: in, Platform: "linux/amd64", Params: params}.Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := l.DefinitionKey(src, s); err != nil || got != want.String() {
+		t.Fatalf("K = %s, %v; want %s", got, err, want)
+	}
+	if len(l.roots) != 0 {
+		t.Error("a spec without sources ingested the project root")
+	}
+}
+
+func TestSourceForWidensTheDefinition(t *testing.T) {
+	ctx := context.Background()
+	root := project(t)
+	l, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	s := spec.BuildSpec{Path: "/services/a", Sources: []string{"/lib"}, Platform: "linux/amd64", BuildFile: "BUILD.prod"}
+	src, err := l.SourceFor(ctx, root, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The context holds exactly the covered paths, in the project layout.
+	top, err := l.store.Ls(ctx, src.key, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range top {
+		names = append(names, e.Name)
+	}
+	if want := []string{"lib", "services"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("context root holds %v, want %v", names, want)
+	}
+
+	in, err := builddef.TreeInput(src.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := canonicalParams(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := builddef.Definition{
+		Source: in, Dir: "services/a", Platform: "linux/amd64", Params: params,
+		BuildFile: "BUILD.prod", Ctx: builddef.CtxWidened,
+	}.Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := l.DefinitionKey(src, s); err != nil || got != want.String() {
+		t.Fatalf("K = %s, %v; want %s", got, err, want)
+	}
+}
+
+func TestSourceForKey(t *testing.T) {
+	root := project(t)
+	s := spec.BuildSpec{Path: "/services/a", Sources: []string{"/lib"}, Platform: "linux/amd64"}
+	base := keyOf(t, root, s)
+
+	if again := keyOf(t, root, s); again != base {
+		t.Fatalf("K is not stable: %s then %s", base, again)
+	}
+
+	// Outside the covered paths: no effect.
+	writeFile(t, root, "other/y.txt", "changed\n")
+	writeFile(t, root, "new/z.txt", "z\n")
+	if got := keyOf(t, root, s); got != base {
+		t.Error("a change outside the covered paths moved K")
+	}
+
+	// Only timestamps inside them: no effect.
+	old := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	for _, p := range []string{"lib/x.go", "lib", "services/a/main.go", "services/a", "services"} {
+		if err := os.Chtimes(filepath.Join(root, filepath.FromSlash(p)), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := keyOf(t, root, s); got != base {
+		t.Error("changed mtimes inside the covered paths moved K")
+	}
+
+	// Content inside them: K moves.
+	writeFile(t, root, "lib/x.go", "package lib // changed\n")
+	afterLib := keyOf(t, root, s)
+	if afterLib == base {
+		t.Error("a change in a source did not move K")
+	}
+	writeFile(t, root, "services/a/main.go", "package main // changed\n")
+	if got := keyOf(t, root, s); got == afterLib {
+		t.Error("a change in the build path did not move K")
+	}
+}
+
+func TestSourceForErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a source that does not exist", func(t *testing.T) {
+		root := project(t)
+		l, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		s := spec.BuildSpec{Name: "api", Path: "/services/a", Sources: []string{"/nope"}, Platform: "linux/amd64"}
+		_, err = l.SourceFor(ctx, root, s)
+		if err == nil || !strings.Contains(err.Error(), "/nope is not in the project tree") || !strings.Contains(err.Error(), "api") {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(err.Error(), "amberignore") {
+			t.Errorf("a path missing on disk blamed .amberignore: %v", err)
+		}
+	})
+
+	t.Run("a source an .amberignore excludes", func(t *testing.T) {
+		root := project(t)
+		writeFile(t, root, ".amberignore", "/lib\n")
+		l, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		s := spec.BuildSpec{Path: "/services/a", Sources: []string{"/lib"}, Platform: "linux/amd64"}
+		_, err = l.SourceFor(ctx, root, s)
+		if err == nil || !strings.Contains(err.Error(), "/lib is not in the project tree") || !strings.Contains(err.Error(), ".amberignore") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("a build path that is a file", func(t *testing.T) {
+		root := project(t)
+		l, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		s := spec.BuildSpec{Path: "/services/a/main.go", Sources: []string{"/lib"}, Platform: "linux/amd64"}
+		if _, err = l.SourceFor(ctx, root, s); err == nil || !strings.Contains(err.Error(), "/services/a/main.go is not a directory") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("a path spelled with another case", func(t *testing.T) {
+		root := project(t)
+		l, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		// On a case-insensitive filesystem /Lib exists on disk, yet the tree
+		// holds lib: the hint must not blame an .amberignore alone.
+		s := spec.BuildSpec{Path: "/services/a", Sources: []string{"/Lib"}, Platform: "linux/amd64"}
+		_, err = l.SourceFor(ctx, root, s)
+		if err == nil || !strings.Contains(err.Error(), "/Lib is not in the project tree") {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(err.Error(), "exists on disk") && !strings.Contains(err.Error(), "different case") {
+			t.Errorf("misleading hint: %v", err)
+		}
+	})
+
+	t.Run("a build path that does not exist", func(t *testing.T) {
+		root := project(t)
+		l, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		s := spec.BuildSpec{Path: "/services/missing", Sources: []string{"/lib"}, Platform: "linux/amd64"}
+		if _, err = l.SourceFor(ctx, root, s); err == nil || !strings.Contains(err.Error(), "/services/missing is not in the project tree") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestSourceForIngestsTheRootOnce(t *testing.T) {
+	ctx := context.Background()
+	root := project(t)
+	writeFile(t, root, "services/b/BUILD.jobs", "# recipe\n")
+	l, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	a, err := l.SourceFor(ctx, root, spec.BuildSpec{Path: "/services/a", Sources: []string{"/lib"}, Platform: "linux/amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A file that appears after the first ingest is not seen by the second
+	// spec: one run, one view of the project.
+	writeFile(t, root, "lib/late.go", "package lib\n")
+	b, err := l.SourceFor(ctx, root, spec.BuildSpec{Path: "/services/b", Sources: []string{"/lib"}, Platform: "linux/amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := l.store.Ls(ctx, b.key, "lib")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "x.go" {
+		t.Errorf("the second spec saw a second ingest: lib holds %v", entries)
+	}
+	if a.String() == b.String() {
+		t.Error("two build paths share a context")
 	}
 }

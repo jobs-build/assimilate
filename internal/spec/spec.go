@@ -15,8 +15,13 @@ import (
 
 // BuildSpec is one jobs-build image object extracted from a template.
 type BuildSpec struct {
-	Name      string            // display name; empty = derived by DisplayName
-	Path      string            // source dir relative to the project root; "/" = the root
+	Name string // display name; empty = derived by DisplayName
+	Path string // source dir relative to the project root; "/" = the root
+	// Sources are the other project paths the build may reference ("/"-rooted,
+	// as normalized by NormalizeSources; nil = none). With sources the build's
+	// source is the project root pruned to Path and Sources, and Path becomes
+	// the build directory inside it.
+	Sources   []string
 	BuildFile string            // recipe path relative to Path; "" = BUILD.jobs
 	Args      map[string]string // build params (jobs --param key=value)
 	Platform  string            // required, e.g. linux/amd64
@@ -41,6 +46,15 @@ func (s BuildSpec) Key() string {
 	for _, k := range keys {
 		comp(k)
 		comp(s.Args[k])
+	}
+	// Sources follow a marker that no length-prefixed component can start
+	// with, so a sources list never reads as args, and a spec without
+	// sources keeps the key it always had.
+	if len(s.Sources) > 0 {
+		b.WriteString("|sources")
+		for _, p := range s.Sources {
+			comp(p)
+		}
 	}
 	return b.String()
 }
@@ -144,4 +158,65 @@ func SourceDir(root, p string) string {
 // named "jobs" whose tags are build keys.
 func ImageRef(registry, k string) string {
 	return registry + "/jobs:" + k
+}
+
+// SourceKey identifies the source tree a spec builds from — its path and
+// sources. Specs with equal SourceKeys share one ingest and one push.
+func (s BuildSpec) SourceKey() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d:%s", len(s.Path), s.Path)
+	for _, p := range s.Sources {
+		fmt.Fprintf(&b, "%d:%s", len(p), p)
+	}
+	return b.String()
+}
+
+// Keep lists the project-relative paths (no leading slash, sorted) that make
+// up the source tree of a spec with sources: the sources, plus the path
+// unless a source contains it.
+func (s BuildSpec) Keep() []string {
+	keep := make([]string, 0, len(s.Sources)+1)
+	covered := false
+	for _, p := range s.Sources {
+		if within(s.Path, p) {
+			covered = true
+		}
+		keep = append(keep, strings.TrimPrefix(p, "/"))
+	}
+	if !covered {
+		keep = append(keep, strings.TrimPrefix(s.Path, "/"))
+	}
+	sort.Strings(keep)
+	return keep
+}
+
+// NormalizeSources returns the canonical sources of a spec at path. Entries
+// are cleaned "/"-rooted paths; the result is sorted, without duplicates,
+// without entries equal to or inside path (the build has those anyway) and
+// without entries inside another entry. nil when nothing remains.
+func NormalizeSources(path string, sources []string) []string {
+	sorted := append([]string(nil), sources...)
+	sort.Strings(sorted)
+	var out []string
+	for _, p := range sorted {
+		if within(p, path) {
+			continue
+		}
+		nested := false
+		for _, kept := range out {
+			if within(p, kept) {
+				nested = true
+				break
+			}
+		}
+		if !nested {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// within reports whether the "/"-rooted path p is dir or lies inside it.
+func within(p, dir string) bool {
+	return p == dir || dir == "/" || strings.HasPrefix(p, dir+"/")
 }

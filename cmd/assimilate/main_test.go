@@ -17,6 +17,7 @@ import (
 	"github.com/adrg/xdg"
 	"github.com/urfave/cli/v2"
 
+	"github.com/jobs-build/assimilate/internal/jobs"
 	"github.com/jobs-build/assimilate/internal/spec"
 )
 
@@ -336,5 +337,87 @@ func TestParseAdoptDir(t *testing.T) {
 				t.Fatalf("parseAdoptDir(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
 			}
 		})
+	}
+}
+
+func writeTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for rel, content := range files {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The same path with and without sources is two source trees: render must
+// key them apart, or the with-sources image gets a tag deploy would never
+// produce.
+func TestResolveSourcesKeysBySource(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"services/a/BUILD.jobs": "# recipe\n",
+		"services/a/main.go":    "package main\n",
+		"lib/x.go":              "package lib\n",
+	})
+	local, err := jobs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	plain := spec.BuildSpec{Path: "/services/a", Platform: "linux/amd64"}
+	withLib := spec.BuildSpec{Path: "/services/a", Sources: []string{"/lib"}, Platform: "linux/amd64"}
+	srcs, err := resolveSources(ctx, local, root, []spec.BuildSpec{plain, withLib, plain}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(srcs) != 2 {
+		t.Fatalf("%d sources resolved, want 2", len(srcs))
+	}
+	for _, s := range []spec.BuildSpec{plain, withLib} {
+		want, err := local.SourceFor(ctx, root, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := srcs[s.SourceKey()]; got.String() != want.String() {
+			t.Errorf("%v: resolved %s, want %s", s.Sources, got, want)
+		}
+	}
+	if srcs[plain.SourceKey()].String() == srcs[withLib.SourceKey()].String() {
+		t.Error("the two source trees are the same")
+	}
+}
+
+// deploy resolves every image with sources before it builds anything: one
+// bad source must not surface only after all other images were built.
+func TestPreflightSources(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"services/a/BUILD.jobs": "# recipe\n",
+		"lib/x.go":              "package lib\n",
+	})
+	local, err := jobs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	good := spec.BuildSpec{Path: "/services/a", Sources: []string{"/lib"}, Platform: "linux/amd64"}
+	bad := spec.BuildSpec{Name: "broken", Path: "/services/a", Sources: []string{"/nope"}, Platform: "linux/amd64"}
+	// Images without sources are left to the build run, as before.
+	plainMissing := spec.BuildSpec{Path: "/services/gone", Platform: "linux/amd64"}
+
+	if err := preflightSources(ctx, local, root, []spec.BuildSpec{plainMissing, good}); err != nil {
+		t.Fatalf("preflight = %v", err)
+	}
+	err = preflightSources(ctx, local, root, []spec.BuildSpec{good, plainMissing, bad})
+	if err == nil || !strings.Contains(err.Error(), "/nope is not in the project tree") || !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("preflight = %v", err)
 	}
 }

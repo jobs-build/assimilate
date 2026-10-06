@@ -63,7 +63,8 @@ type site struct {
 // broken YAML, image aliases or `<<` merge keys hiding a build object,
 // aliased build anchors, ".." path segments) are reported with file and
 // line. A `jobs-build` object's fields: name (optional), path (optional,
-// default "/"), build-file (optional), args (optional string map), platform
+// default "/"), sources (optional list of other project paths the build may
+// reference), build-file (optional), args (optional string map), platform
 // (required).
 func Scan(envDir string) (*Extraction, error) {
 	x := &Extraction{}
@@ -266,13 +267,17 @@ func isJobsBuild(v *yaml.Node) bool {
 }
 
 // decodeBuild strictly decodes one jobs-build mapping: allowed keys are
-// exactly {type, name, path, build-file, args, platform}; unknown or
-// duplicate keys are errors; platform is required non-empty; path must not
-// contain ".." and is normalized to a cleaned, "/"-prefixed slash path.
+// exactly {type, name, path, sources, build-file, args, platform}; unknown
+// or duplicate keys are errors; platform is required non-empty; path must
+// not contain ".." and is normalized to a cleaned, "/"-prefixed slash path;
+// sources are the other project paths the build may reference, normalized
+// against the path (spec.NormalizeSources) and not allowed on a root build.
 func decodeBuild(file string, m *yaml.Node) (spec.BuildSpec, error) {
 	var s spec.BuildSpec
 	seen := map[string]bool{}
 	platformLine := 0
+	var sources []string
+	sourcesLine := 0
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		k, v := m.Content[i], m.Content[i+1]
 		if k.Kind != yaml.ScalarNode {
@@ -300,6 +305,9 @@ func decodeBuild(file string, m *yaml.Node) (spec.BuildSpec, error) {
 			platformLine = v.Line
 		case "args":
 			s.Args, err = decodeArgs(file, v)
+		case "sources":
+			sources, err = decodeSources(file, v)
+			sourcesLine = k.Line
 		default:
 			err = nodeErrf(file, k.Line, "jobs-build image object: unknown key %q", k.Value)
 		}
@@ -315,7 +323,37 @@ func decodeBuild(file string, m *yaml.Node) (spec.BuildSpec, error) {
 		return s, nodeErrf(file, line, "jobs-build image object: platform is required")
 	}
 	s.Path = normalizePath(s.Path)
+	if len(sources) > 0 && s.Path == "/" {
+		return s, nodeErrf(file, sourcesLine, "jobs-build image object: sources is not allowed on a root build (path %q already covers the project)", "/")
+	}
+	s.Sources = spec.NormalizeSources(s.Path, sources)
 	return s, nil
+}
+
+// decodeSources requires v to be a sequence of non-empty scalar paths without
+// ".." that do not name the project root, and returns them cleaned and
+// "/"-prefixed (not yet normalized against the build path).
+func decodeSources(file string, v *yaml.Node) ([]string, error) {
+	if v.Kind != yaml.SequenceNode {
+		return nil, nodeErrf(file, v.Line, "jobs-build image object: sources must be a list of paths")
+	}
+	out := make([]string, 0, len(v.Content))
+	for _, item := range v.Content {
+		// A path is a string: 42, true and ~ are scalars too, but a typo
+		// is likelier than a directory of that name.
+		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" || item.Value == "" {
+			return nil, nodeErrf(file, item.Line, "jobs-build image object: sources entries must be non-empty strings")
+		}
+		if hasDotDot(item.Value) {
+			return nil, nodeErrf(file, item.Line, "jobs-build image object: sources must not contain %q", "..")
+		}
+		p := normalizePath(item.Value)
+		if p == "/" {
+			return nil, nodeErrf(file, item.Line, "jobs-build image object: sources must not name the project root")
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // scalarValue requires v to be a scalar and returns its string value; the
