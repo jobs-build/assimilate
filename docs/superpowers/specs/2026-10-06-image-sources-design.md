@@ -1,7 +1,7 @@
 # `sources`: sibling paths for jobs-build images
 
 Date: 2026-10-06
-Status: awaiting review
+Status: approved
 
 ## Problem
 
