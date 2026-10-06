@@ -56,6 +56,8 @@ containers:
       type: jobs-build
       name: api              # optional; display name in the TUI
       path: /services/api    # source dir relative to the repo root (default "/")
+      sources:               # optional; other repo paths the build may reference
+        - /proto
       build-file: BUILD.prod # optional; recipe path (default BUILD.jobs)
       args:                  # optional; jobs build params (--param key=value)
         variant: slim
@@ -77,8 +79,57 @@ step in CI; registry manifest digests are unaffected, only tags churn).
 
 Exclusions come from `.amberignore` files at or below the build path — put a
 `.amberignore` inside each build path; one at the monorepo root is not
-consulted for subtree builds. Don't define jobs-build image objects via YAML
-anchors/aliases or `<<` merge keys — the template scanner rejects them.
+consulted for subtree builds (it is for images with `sources`, below). Don't
+define jobs-build image objects via YAML anchors/aliases or `<<` merge keys —
+the template scanner rejects them.
+
+### Sharing source between images: `sources`
+
+Without `sources` a build sees its `path` and nothing else. `sources` lists
+the other repo paths — files or directories, written like `path` — that the
+build may reference:
+
+```yaml
+image:
+  type: jobs-build
+  path: /services/api
+  sources:
+    - /proto
+  platform: linux/amd64
+```
+
+The build then runs in the repo pruned to `path` plus `sources`, laid out as
+in the repo, with `path` as the build directory. Relative references between
+them resolve as they do in your checkout: a Go `replace … => ../../proto`,
+a cargo path dependency, a shared proto directory.
+
+- Entries are cleaned and normalized: duplicates, entries inside `path` and
+  entries inside another entry are dropped. `..` and `/` are errors, and so
+  is `sources` on a root build (`path: /` already covers the repo).
+- Every listed path must exist and must not be excluded by an `.amberignore`;
+  otherwise the run stops before any build, naming the path.
+- A path the recipe needs but the template does not list fails that build,
+  naming the path. Listing more than needed only costs a new tag when those
+  paths change.
+
+What the tag K depends on:
+
+| | without `sources` | with `sources` |
+|---|---|---|
+| content and modes under `path` | yes | yes |
+| content and modes under each source | — | yes |
+| anything else in the repo | no | no |
+| mtime, uid, gid | yes | no |
+
+So a tag with `sources` is the same on a fresh clone of the same commit; the
+mtime caveat above applies only to images without it. Adding `sources` to an
+image changes its tag once. Images without `sources` are built exactly as
+before.
+
+With any `sources` image, a run walks the whole repo once: keep large
+untracked directories out with a `.amberignore` at the repo root (`.git` is
+always skipped). The server must be jobs-iroh v0.11.0 or later (v0.12.0 if
+the recipe returns `closure=`).
 
 Files without substitutions are copied byte-identical; substituted files keep
 their comments.

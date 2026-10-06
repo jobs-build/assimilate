@@ -98,6 +98,7 @@ containers:
       type: jobs-build
       name: backend            # optional; display name in the TUI (default: "<path> <platform>")
       path: services/backend   # source dir relative to the project root (default "/" = the root)
+      sources: [/proto]        # optional; other project paths the build may reference
       build-file: BUILD.prod   # optional; recipe path (default BUILD.jobs)
       args:                    # optional; build params, become jobs `--param key=value`
         variant: slim
@@ -108,8 +109,11 @@ Rules:
 
 - `platform` is required — a missing platform is a hard error before any build starts.
 - Unknown keys in a `jobs-build` object are an error (typo protection).
-- Identical specs (`path`+`build-file`+`args`+`platform`) are built once and
-  substituted everywhere they appear.
+- Identical specs (`path`+`sources`+`build-file`+`args`+`platform`) are built
+  once and substituted everywhere they appear.
+- `sources` entries are cleaned to `/`-rooted paths and normalized against
+  `path` (duplicates, entries inside `path` and nested entries dropped,
+  sorted). `..`, `/` and `sources` on a root build are errors.
 - Build ordering (for the TUI list) is order of first appearance: files in
   lexical path order, objects in document order within a file.
 
@@ -139,10 +143,24 @@ assimilate imports jobs-iroh's exported packages directly — no shelling out:
    ingest never consults a monorepo-root `.amberignore`, so centralized
    exclusions (`node_modules`, `.env`, …) silently don't apply: put a
    `.amberignore` inside each build path.
+
+   A spec with `sources` takes the other route: the project root is
+   ingested once per run (the root `.amberignore` applies, `.git` is always
+   skipped), `path` and every source are checked to be in that tree, and
+   `PruneTree(root, {path} ∪ sources)` yields the source tree — exactly those
+   paths in the project layout, with normalized metadata (uid/gid zeroed,
+   mtime fixed), so its key does not depend on mtimes. This is the context
+   jobs-iroh's sibling-sources design expects; the "cannot reference anything
+   outside their build root" argument above holds only without `sources`.
 2. Construct the canonical `builddef.Definition{Source: TreeInput(sourceKey),
    Platform, Params: importdef.CanonicalParams(args), BuildFile}` → canonical
    bytes + build key **K** (known before the build even starts; K is the
    registry tag; the server echoes it back in `Submitted` as a cross-check).
+   With `sources` the definition also carries `Dir` (the spec's path inside
+   the pruned tree) and `Ctx: CtxWidened` — what jobs-iroh's own client
+   builds for a subdirectory; the server then pins the build's covered paths
+   inside that context and fails the build if one is missing. A spec without
+   `sources` encodes byte for byte as before.
 3. Dial the server once on `jobs-amber-admin/1.0` (`amberclient.Dial`) and
    push each unique source tree under a `client-push/<hex>` scratch ref
    (mandatory prefix; pushes are delta — only missing objects transfer). The
