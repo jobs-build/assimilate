@@ -216,16 +216,24 @@ func (l *Local) SourceFor(ctx context.Context, root string, s spec.BuildSpec) (S
 		return Source{}, err
 	}
 	for _, p := range append([]string{s.Path}, s.Sources...) {
-		ok, err := l.inTree(ctx, rootKey, p)
+		mode, ok, err := l.lookup(ctx, rootKey, p)
 		if err != nil {
 			return Source{}, fmt.Errorf("image %s: resolve %s in the project tree: %w", s.DisplayName(), p, err)
 		}
 		if !ok {
 			hint := ""
 			if _, statErr := os.Lstat(spec.SourceDir(root, p)); statErr == nil {
-				hint = " (it exists on disk: an .amberignore excludes it)"
+				// On disk but not ingested. Lstat also succeeds for another
+				// spelling on a case-insensitive filesystem, where the tree
+				// holds the name as it is on disk.
+				hint = " (it exists on disk but was not ingested: an .amberignore excludes it, or the path is spelled with a different case)"
 			}
 			return Source{}, fmt.Errorf("image %s: %s is not in the project tree%s", s.DisplayName(), p, hint)
+		}
+		// The build directory must be a real directory of the tree: the
+		// server resolves it without following symlinks.
+		if p == s.Path && mode&unix.S_IFMT != unix.S_IFDIR {
+			return Source{}, fmt.Errorf("image %s: path %s is not a directory in the project tree (symlinks are not followed)", s.DisplayName(), p)
 		}
 	}
 	k, err := l.store.PruneTree(ctx, rootKey, s.Keep())
@@ -254,27 +262,33 @@ func (l *Local) ingestRoot(ctx context.Context, root string) (key.Key, error) {
 	return k, nil
 }
 
-// inTree reports whether the "/"-rooted path p names an entry of the tree.
-func (l *Local) inTree(ctx context.Context, root key.Key, p string) (bool, error) {
+// lookup finds the entry the "/"-rooted path p names in the tree and returns
+// its mode; ok is false when no such entry exists (a component that is not a
+// directory has no entries below it).
+func (l *Local) lookup(ctx context.Context, root key.Key, p string) (mode uint64, ok bool, err error) {
 	dir := ""
+	mode = unix.S_IFDIR // of the root, for the walk's first step
 	for _, seg := range strings.Split(strings.Trim(p, "/"), "/") {
+		if mode&unix.S_IFMT != unix.S_IFDIR {
+			return 0, false, nil
+		}
 		entries, err := l.store.Ls(ctx, root, dir)
 		if err != nil {
-			return false, err
+			return 0, false, err
 		}
 		found := false
 		for _, e := range entries {
 			if e.Name == seg {
-				found = true
+				mode, found = e.Mode, true
 				break
 			}
 		}
 		if !found {
-			return false, nil
+			return 0, false, nil
 		}
 		dir = path.Join(dir, seg)
 	}
-	return true, nil
+	return mode, true, nil
 }
 
 // DefinitionKey computes the canonical build definition of s over src and

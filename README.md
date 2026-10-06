@@ -98,10 +98,20 @@ image:
   platform: linux/amd64
 ```
 
-The build then runs in the repo pruned to `path` plus `sources`, laid out as
-in the repo, with `path` as the build directory. Relative references between
-them resolve as they do in your checkout: a Go `replace … => ../../proto`,
-a cargo path dependency, a shared proto directory.
+assimilate then hands the server the repo pruned to `path` plus `sources`,
+laid out as in the repo, with `path` as the build directory.
+
+`sources` makes those paths *available*; the recipe decides what the build
+*uses*. jobs-iroh puts into the build what the recipe covers: its own
+directory (or the `closure=` it returns), the `sources=` it declares, and
+what its plugins contribute. So the recipe has to name the sibling as well —
+`sources = ["//proto"]` on the `build()` return — or use a plugin that finds
+it: plugin-go, given `go_mod=` and `go_closure=`, follows relative `replace`
+directives into sibling modules. Covered paths keep their repo layout, so
+relative references between them resolve as in your checkout: a Go
+`replace … => ../../proto`, a cargo path dependency, a shared proto
+directory. A path listed here that the recipe does not cover is simply
+absent from the build.
 
 - Entries are cleaned and normalized: duplicates, entries inside `path` and
   entries inside another entry are dropped. `..` and `/` are errors, and so
@@ -111,6 +121,11 @@ a cargo path dependency, a shared proto directory.
 - A path the recipe needs but the template does not list fails that build,
   naming the path. Listing more than needed only costs a new tag when those
   paths change.
+- Symlinks are not followed out of the listed paths: a link inside a covered
+  directory whose target is elsewhere in the repo stays dangling in the build
+  (the server warns) — list the target. An absolute link, or one that leaves
+  the repo, inside a covered directory fails the build.
+- `path` must be a real directory of the repo, not a symlink to one.
 
 What the tag K depends on:
 
@@ -121,15 +136,23 @@ What the tag K depends on:
 | anything else in the repo | no | no |
 | mtime, uid, gid | yes | no |
 
-So a tag with `sources` is the same on a fresh clone of the same commit; the
-mtime caveat above applies only to images without it. Adding `sources` to an
-image changes its tag once. Images without `sources` are built exactly as
-before.
+So a tag with `sources` is the same on a fresh clone of the same commit
+(given the same file modes, and no untracked, un-ignored files under the
+listed paths); the mtime caveat above applies only to images without it.
+Adding `sources` to an image changes its tag once. Images without `sources`
+are built exactly as before.
 
-With any `sources` image, a run walks the whole repo once: keep large
-untracked directories out with a `.amberignore` at the repo root (`.git` is
-always skipped). The server must be jobs-iroh v0.11.0 or later (v0.12.0 if
-the recipe returns `closure=`).
+With any `sources` image, a run ingests the whole repo once into assimilate's
+local store (only the pruned tree is pushed): keep large untracked
+directories out with a `.amberignore` at the repo root (`.git` is always
+skipped). A file anywhere in the repo that cannot be read — or a socket or
+fifo — fails every `sources` image, naming the file; ignore it. Files above
+the listed paths (`go.work`, a workspace `Cargo.toml`) are part of the build
+only if listed: a source can be a single file.
+
+The server must be jobs-iroh v0.11.0 or later (v0.12.0 if the recipe returns
+`closure=`); an older one rejects the build at submit ("definition is not
+canonical CBOR").
 
 Files without substitutions are copied byte-identical; substituted files keep
 their comments.

@@ -339,7 +339,9 @@ func decodeSources(file string, v *yaml.Node) ([]string, error) {
 	}
 	out := make([]string, 0, len(v.Content))
 	for _, item := range v.Content {
-		if item.Kind != yaml.ScalarNode || item.Value == "" {
+		// A path is a string: 42, true and ~ are scalars too, but a typo
+		// is likelier than a directory of that name.
+		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" || item.Value == "" {
 			return nil, nodeErrf(file, item.Line, "jobs-build image object: sources entries must be non-empty strings")
 		}
 		if hasDotDot(item.Value) {

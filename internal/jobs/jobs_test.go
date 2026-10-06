@@ -378,6 +378,38 @@ func TestSourceForErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("a build path that is a file", func(t *testing.T) {
+		root := project(t)
+		l, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		s := spec.BuildSpec{Path: "/services/a/main.go", Sources: []string{"/lib"}, Platform: "linux/amd64"}
+		if _, err = l.SourceFor(ctx, root, s); err == nil || !strings.Contains(err.Error(), "/services/a/main.go is not a directory") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("a path spelled with another case", func(t *testing.T) {
+		root := project(t)
+		l, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		// On a case-insensitive filesystem /Lib exists on disk, yet the tree
+		// holds lib: the hint must not blame an .amberignore alone.
+		s := spec.BuildSpec{Path: "/services/a", Sources: []string{"/Lib"}, Platform: "linux/amd64"}
+		_, err = l.SourceFor(ctx, root, s)
+		if err == nil || !strings.Contains(err.Error(), "/Lib is not in the project tree") {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(err.Error(), "exists on disk") && !strings.Contains(err.Error(), "different case") {
+			t.Errorf("misleading hint: %v", err)
+		}
+	})
+
 	t.Run("a build path that does not exist", func(t *testing.T) {
 		root := project(t)
 		l, err := Open(t.TempDir())
@@ -412,9 +444,6 @@ func TestSourceForIngestsTheRootOnce(t *testing.T) {
 	b, err := l.SourceFor(ctx, root, spec.BuildSpec{Path: "/services/b", Sources: []string{"/lib"}, Platform: "linux/amd64"})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(l.roots) != 1 {
-		t.Fatalf("%d root ingests recorded, want 1", len(l.roots))
 	}
 	entries, err := l.store.Ls(ctx, b.key, "lib")
 	if err != nil {

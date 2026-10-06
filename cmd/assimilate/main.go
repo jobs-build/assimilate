@@ -213,6 +213,11 @@ func deploy(c *cli.Context) error {
 			return err
 		}
 		defer local.Close()
+		// A source that is not in the project tree stops the deploy here,
+		// not after every other image has been built.
+		if err := preflightSources(ctx, local, root, x.Builds); err != nil {
+			return err
+		}
 		client, err := jobs.Dial(ctx, local, jobs.Options{
 			Server: server,
 			Addrs:  splitAddrs(os.Getenv("JOBS_SERVER_ADDR")),
@@ -302,6 +307,37 @@ func deploy(c *cli.Context) error {
 	return nil
 }
 
+// resolveSources resolves the source tree of every spec that only accepts
+// (nil = all of them), once per distinct source (spec.SourceKey): the same
+// path with and without sources is two trees.
+func resolveSources(ctx context.Context, local *jobs.Local, root string, specs []spec.BuildSpec, only func(spec.BuildSpec) bool) (map[string]jobs.Source, error) {
+	srcs := map[string]jobs.Source{}
+	for _, s := range specs {
+		if only != nil && !only(s) {
+			continue
+		}
+		if _, ok := srcs[s.SourceKey()]; ok {
+			continue
+		}
+		src, err := local.SourceFor(ctx, root, s)
+		if err != nil {
+			return nil, fmt.Errorf("ingest %s: %w", s.Path, err)
+		}
+		srcs[s.SourceKey()] = src
+	}
+	return srcs, nil
+}
+
+// preflightSources resolves every image with sources before deploy builds
+// anything. Those are the images whose source can be wrong in a way only the
+// project tree shows (a listed path that is missing or ignored); the project
+// root is ingested once and memoized, so the build run does not walk it
+// again. Images without sources are left to the build run, as before.
+func preflightSources(ctx context.Context, local *jobs.Local, root string, specs []spec.BuildSpec) error {
+	_, err := resolveSources(ctx, local, root, specs, func(s spec.BuildSpec) bool { return len(s.Sources) > 0 })
+	return err
+}
+
 // render resolves image refs offline (K is the hash of the canonical build
 // definition — a local ingest suffices) and prints the rendered manifests.
 func render(c *cli.Context) error {
@@ -316,16 +352,12 @@ func render(c *cli.Context) error {
 			return err
 		}
 		defer local.Close()
-		srcs := map[string]jobs.Source{}
+		srcs, err := resolveSources(c.Context, local, root, x.Builds, nil)
+		if err != nil {
+			return err
+		}
 		for _, s := range x.Builds {
-			src, ok := srcs[s.SourceKey()]
-			if !ok {
-				if src, err = local.SourceFor(c.Context, root, s); err != nil {
-					return fmt.Errorf("ingest %s: %w", s.Path, err)
-				}
-				srcs[s.SourceKey()] = src
-			}
-			k, err := local.DefinitionKey(src, s)
+			k, err := local.DefinitionKey(srcs[s.SourceKey()], s)
 			if err != nil {
 				return err
 			}

@@ -161,6 +161,13 @@ assimilate imports jobs-iroh's exported packages directly — no shelling out:
    builds for a subdirectory; the server then pins the build's covered paths
    inside that context and fails the build if one is missing. A spec without
    `sources` encodes byte for byte as before.
+
+   `sources` is thus the *bound* on what a build may reference, not what it
+   gets: the sandbox holds what the recipe covers (its directory or
+   `closure=`, its `sources=`, its plugins' paths). `deploy` resolves every
+   spec with sources before it dials the server, so a listed path that is
+   missing, ignored, or — for `path` — not a directory stops the run before
+   any build; `Run` then reuses the memoized root ingest.
 3. Dial the server once on `jobs-amber-admin/1.0` (`amberclient.Dial`) and
    push each unique source tree under a `client-push/<hex>` scratch ref
    (mandatory prefix; pushes are delta — only missing objects transfer). The
