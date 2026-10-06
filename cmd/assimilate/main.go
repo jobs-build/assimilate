@@ -318,12 +318,12 @@ func render(c *cli.Context) error {
 		defer local.Close()
 		srcs := map[string]jobs.Source{}
 		for _, s := range x.Builds {
-			src, ok := srcs[s.Path]
+			src, ok := srcs[s.SourceKey()]
 			if !ok {
-				if src, err = local.Ingest(c.Context, spec.SourceDir(root, s.Path)); err != nil {
+				if src, err = local.SourceFor(c.Context, root, s); err != nil {
 					return fmt.Errorf("ingest %s: %w", s.Path, err)
 				}
-				srcs[s.Path] = src
+				srcs[s.SourceKey()] = src
 			}
 			k, err := local.DefinitionKey(src, s)
 			if err != nil {

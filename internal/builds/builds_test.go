@@ -30,6 +30,7 @@ type followFn func(ctx context.Context, sink jobs.Sink) (spec.BuildState, error)
 type fake struct {
 	mu         sync.Mutex
 	ingests    []string // dirs, call order
+	sources    []string // spec.SourceKey of each resolved source, call order
 	pushes     []string // dirs (paired to last ingest), call order
 	submits    []string // spec display names, call order
 	cancels    []jobs.Handle
@@ -51,8 +52,10 @@ func kFor(name string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (f *fake) Ingest(ctx context.Context, dir string) (jobs.Source, error) {
+func (f *fake) SourceFor(ctx context.Context, root string, s spec.BuildSpec) (jobs.Source, error) {
+	dir := spec.SourceDir(root, s.Path)
 	f.mu.Lock()
+	f.sources = append(f.sources, s.SourceKey())
 	f.ingests = append(f.ingests, dir)
 	f.lastIngest = dir
 	f.mu.Unlock()
@@ -713,5 +716,34 @@ func TestNoSpecs(t *testing.T) {
 	}
 	if len(f.ingests) != 0 {
 		t.Errorf("ingests = %v, want none", f.ingests)
+	}
+}
+
+func TestRunGroupsBySource(t *testing.T) {
+	f := &fake{}
+	specs := []spec.BuildSpec{
+		{Name: "plain", Path: "/services/a", Platform: "linux/amd64"},
+		{Name: "with-proto", Path: "/services/a", Sources: []string{"/proto"}, Platform: "linux/amd64"},
+		{Name: "with-proto-arm", Path: "/services/a", Sources: []string{"/proto"}, Platform: "linux/arm64"},
+		{Name: "plain-arm", Path: "/services/a", Platform: "linux/arm64"},
+	}
+	events := make(chan spec.Event, 1024)
+	results, err := Run(context.Background(), "/root", "reg", specs, f, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if r.State != spec.StateDone {
+			t.Errorf("%s: %s %s", r.Spec.Name, r.State, r.Err)
+		}
+	}
+	// One source per (path, sources): the same path with and without
+	// sources is two trees; platforms share one.
+	want := []string{specs[0].SourceKey(), specs[1].SourceKey()}
+	if !reflect.DeepEqual(f.sources, want) {
+		t.Errorf("sources resolved: %v, want %v", f.sources, want)
+	}
+	if len(f.submits) != 4 {
+		t.Errorf("%d submits, want 4", len(f.submits))
 	}
 }

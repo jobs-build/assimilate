@@ -20,7 +20,9 @@ import (
 // it (jobs.Source zero values are fine for fakes — the orchestrator treats
 // sources as opaque).
 type Backend interface {
-	Ingest(ctx context.Context, dir string) (jobs.Source, error)
+	// SourceFor resolves the source tree a spec builds from under the
+	// project root (jobs.Local.SourceFor).
+	SourceFor(ctx context.Context, root string, s spec.BuildSpec) (jobs.Source, error)
 	PushSource(ctx context.Context, src *jobs.Source, prog jobs.ProgressFunc) error
 	Submit(ctx context.Context, src jobs.Source, s spec.BuildSpec) (jobs.Handle, error)
 	Follow(ctx context.Context, h jobs.Handle, sink jobs.Sink) (spec.BuildState, error)
@@ -58,8 +60,9 @@ var inFlightSlots = maxInFlight
 // events along the way. root is the project root that spec paths are
 // relative to; registry prefixes image refs.
 //
-// Behavior: specs are grouped by source path preserving appearance order;
-// each group's source is ingested and pushed (its builds show StatePushing),
+// Behavior: specs are grouped by source tree — a path, or a path and its
+// sources (spec.SourceKey) — preserving appearance order; each group's
+// source is resolved and pushed (its builds show StatePushing),
 // then each build submits and follows concurrently while later groups still
 // push. A failing build does not stop the others — the user sees every
 // failure. Context cancellation sends best-effort Cancels for in-flight
@@ -89,19 +92,20 @@ func Run(ctx context.Context, root, registry string, specs []spec.BuildSpec, b B
 		r.results[i] = Result{Spec: s, State: spec.StatePending}
 	}
 
-	// One group per unique source path, first-appearance order; a group's
-	// builds all submit as soon as its push lands.
+	// One group per unique source tree — a path, or a path and its sources —
+	// in first-appearance order; a group's builds all submit as soon as its
+	// push lands.
 	type group struct {
-		path string
+		spec spec.BuildSpec // the first spec: carries the source identity
 		idxs []int
 	}
 	var groups []*group
-	byPath := map[string]*group{}
+	bySource := map[string]*group{}
 	for i, s := range specs {
-		g := byPath[s.Path]
+		g := bySource[s.SourceKey()]
 		if g == nil {
-			g = &group{path: s.Path}
-			byPath[s.Path] = g
+			g = &group{spec: s}
+			bySource[s.SourceKey()] = g
 			groups = append(groups, g)
 		}
 		g.idxs = append(g.idxs, i)
@@ -129,9 +133,9 @@ func Run(ctx context.Context, root, registry string, specs []spec.BuildSpec, b B
 			r.send(spec.Event{Build: i, Kind: spec.KindState, State: spec.StatePushing})
 			r.send(spec.Event{Build: i, Kind: spec.KindInfo, Info: "ingesting"})
 		}
-		src, err := b.Ingest(ctx, spec.SourceDir(root, g.path))
+		src, err := b.SourceFor(ctx, root, g.spec)
 		if err != nil {
-			r.groupError(g.idxs, fmt.Errorf("ingest %s: %w", g.path, err))
+			r.groupError(g.idxs, fmt.Errorf("ingest %s: %w", g.spec.Path, err))
 			continue
 		}
 		prog := func(done, total int) {
@@ -140,7 +144,7 @@ func Run(ctx context.Context, root, registry string, specs []spec.BuildSpec, b B
 			}
 		}
 		if err := b.PushSource(ctx, &src, prog); err != nil {
-			r.groupError(g.idxs, fmt.Errorf("push %s: %w", g.path, err))
+			r.groupError(g.idxs, fmt.Errorf("push %s: %w", g.spec.Path, err))
 			continue
 		}
 		for _, i := range g.idxs {
