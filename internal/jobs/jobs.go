@@ -19,7 +19,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/amber-store/core/key"
@@ -96,6 +99,10 @@ type Local struct {
 	// store is open, and MaybeGC runs the stamp-gated sweep. nil = disabled
 	// (JOBS_GC_RETENTION=0 or construction failure).
 	gc *gcsweep.Sweeper
+	// roots memoizes the project-root ingest for specs with sources: one
+	// run sees one view of the project, however many images share it.
+	rootMu sync.Mutex
+	roots  map[string]key.Key
 }
 
 // Open opens (creating if needed) assimilate's own amber store under dataDir.
@@ -195,6 +202,81 @@ func (l *Local) Ingest(ctx context.Context, dir string) (Source, error) {
 	return Source{key: k, keyStr: k.String(), valid: true}, nil
 }
 
+// SourceFor returns the source tree s builds from under the project root:
+// the ingested subtree at s.Path, or — when s declares sources — the project
+// root pruned to s.Path and s.Sources, in the project's layout and with
+// normalized metadata (jobs-iroh's covered tree). Every path must be in the
+// ingested project tree; one that is missing is an error naming it.
+func (l *Local) SourceFor(ctx context.Context, root string, s spec.BuildSpec) (Source, error) {
+	if len(s.Sources) == 0 {
+		return l.Ingest(ctx, spec.SourceDir(root, s.Path))
+	}
+	rootKey, err := l.ingestRoot(ctx, root)
+	if err != nil {
+		return Source{}, err
+	}
+	for _, p := range append([]string{s.Path}, s.Sources...) {
+		ok, err := l.inTree(ctx, rootKey, p)
+		if err != nil {
+			return Source{}, fmt.Errorf("image %s: resolve %s in the project tree: %w", s.DisplayName(), p, err)
+		}
+		if !ok {
+			hint := ""
+			if _, statErr := os.Lstat(spec.SourceDir(root, p)); statErr == nil {
+				hint = " (it exists on disk: an .amberignore excludes it)"
+			}
+			return Source{}, fmt.Errorf("image %s: %s is not in the project tree%s", s.DisplayName(), p, hint)
+		}
+	}
+	k, err := l.store.PruneTree(ctx, rootKey, s.Keep())
+	if err != nil {
+		return Source{}, fmt.Errorf("image %s: prune the project tree: %w", s.DisplayName(), err)
+	}
+	return Source{key: k, keyStr: k.String(), valid: true}, nil
+}
+
+// ingestRoot ingests the project root (honoring .amberignore files; .git is
+// never ingested), once per Local.
+func (l *Local) ingestRoot(ctx context.Context, root string) (key.Key, error) {
+	l.rootMu.Lock()
+	defer l.rootMu.Unlock()
+	if k, ok := l.roots[root]; ok {
+		return k, nil
+	}
+	k, err := l.store.IngestSourceDir(ctx, root)
+	if err != nil {
+		return key.Key{}, fmt.Errorf("ingest project root %s: %w", root, err)
+	}
+	if l.roots == nil {
+		l.roots = map[string]key.Key{}
+	}
+	l.roots[root] = k
+	return k, nil
+}
+
+// inTree reports whether the "/"-rooted path p names an entry of the tree.
+func (l *Local) inTree(ctx context.Context, root key.Key, p string) (bool, error) {
+	dir := ""
+	for _, seg := range strings.Split(strings.Trim(p, "/"), "/") {
+		entries, err := l.store.Ls(ctx, root, dir)
+		if err != nil {
+			return false, err
+		}
+		found := false
+		for _, e := range entries {
+			if e.Name == seg {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false, nil
+		}
+		dir = path.Join(dir, seg)
+	}
+	return true, nil
+}
+
 // DefinitionKey computes the canonical build definition of s over src and
 // returns the build key K (64-hex) — the future image tag — without any
 // server interaction.
@@ -207,10 +289,11 @@ func (l *Local) DefinitionKey(src Source, s spec.BuildSpec) (string, error) {
 }
 
 // definition constructs the canonical tree-source build Definition of s over
-// src — clientcli's treeDefinition with assimilate's convention baked in:
-// the ingested subtree IS the build root, so Dir stays empty. These fields
-// are the whole identity; the server derives the same K from the same bytes
-// (Submit cross-checks).
+// src — clientcli's treeDefinition with assimilate's conventions baked in.
+// Without sources the ingested subtree IS the build root, so Dir stays empty;
+// with sources src is the pruned project tree and Dir names the service
+// inside it. These fields are the whole identity; the server derives the
+// same K from the same bytes (Submit cross-checks).
 func definition(src Source, s spec.BuildSpec) (canon []byte, k key.Key, err error) {
 	if !src.valid {
 		return nil, key.Key{}, errors.New("jobs: source not ingested")
@@ -228,6 +311,17 @@ func definition(src Source, s spec.BuildSpec) (canon []byte, k key.Key, err erro
 		Platform:  s.Platform,
 		Params:    params,
 		BuildFile: s.BuildFile,
+	}
+	if len(s.Sources) > 0 {
+		// The source is the project pruned to the spec's paths, so the
+		// build root is the service's directory inside it: a widened-context
+		// definition, exactly what jobs-iroh's own client builds for a
+		// subdirectory (clientcli's treeDefinition).
+		def.Dir = strings.TrimPrefix(s.Path, "/")
+		if def.Dir == "" {
+			return nil, key.Key{}, errors.New("jobs: sources on a root build")
+		}
+		def.Ctx = builddef.CtxWidened
 	}
 	canon, err = def.Canonical()
 	if err != nil {
