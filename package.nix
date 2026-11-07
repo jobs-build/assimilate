@@ -2,7 +2,7 @@
 
 buildGoModule {
   pname = "assimilate";
-  version = "0.8.0";
+  version = "0.8.1";
 
   src = lib.cleanSource ./.;
 
