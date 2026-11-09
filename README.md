@@ -26,7 +26,9 @@ templates), and `→`/`enter` unfolds an image into its live jobs-iroh build
 graph (per-step state, elapsed, `(cached)`, failures — a failed image
 unfolds itself). The right pane follows the selected row's output: the
 whole build's log for an image row, that step's own output for a graph
-row. `←` folds, `q` cancels. Without a TTY (CI), plain prefixed lines.
+row. `←` folds, `q` cancels. When every build succeeds the TUI exits on its
+own; after a failure it stays open on the failing step's output until `q`.
+Without a TTY (CI), plain prefixed lines.
 
 ## Project layout
 

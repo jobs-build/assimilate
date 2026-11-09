@@ -219,8 +219,13 @@ node's lines, `kind:key8 │ `-prefixed; per-build ring buffer); for a
 **graph row**, that node's own output only (per-node rings fed by the same
 follow streams — a node whose follow never attached under the budget shows
 nothing). Log follows still attach per active node, capped per build and
-client-wide; the tree opens no extra streams. When every build is finished
-the TUI exits and the GitOps phase prints plain progress lines. Without a
+client-wide; the tree opens no extra streams. When every build succeeds (or
+the run was cancelled) the TUI exits and the GitOps phase prints plain
+progress lines; a run that ends with a failure stays on screen, focused on
+the failing step's output, until `q` — an alt screen keeps nothing once it
+is gone. While the TUI is up, the process's default loggers (slog/log, which
+amberclient and go-iroh write to) are routed into the footer note rather
+than stderr, which on a terminal is the TUI's own screen. Without a
 PTY, everything is plain prefixed lines (`[backend] kind:key8 │ …`), like
 jobs-client's non-TTY mode; snapshots are ignored there.
 
