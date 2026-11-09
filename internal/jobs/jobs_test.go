@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -454,5 +455,120 @@ func TestSourceForIngestsTheRootOnce(t *testing.T) {
 	}
 	if a.String() == b.String() {
 		t.Error("two build paths share a context")
+	}
+}
+
+// decodeDef decodes a spec's canonical definition over root.
+func decodeDef(t *testing.T, root string, s spec.BuildSpec) builddef.Definition {
+	t.Helper()
+	l, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	src, err := l.SourceFor(context.Background(), root, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, _, err := definition(src, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := builddef.DecodeDefinition(canon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestTestDefinitionMirrorsTheImage(t *testing.T) {
+	root := project(t)
+	for _, img := range []spec.BuildSpec{
+		{Path: "/services/a", Platform: "linux/amd64", BuildFile: "BUILD.prod", Args: map[string]string{"variant": "slim"}},
+		{Path: "/services/a", Sources: []string{"/lib"}, Platform: "linux/arm64"},
+	} {
+		b, tst := decodeDef(t, root, img), decodeDef(t, root, img.TestOf())
+		if !tst.Test || tst.BuildFile != "" {
+			t.Fatalf("test def = %+v", tst)
+		}
+		if !bytes.Equal(tst.Source.Definition, b.Source.Definition) || tst.Dir != b.Dir || tst.Ctx != b.Ctx ||
+			tst.Platform != b.Platform || !bytes.Equal(tst.Params, b.Params) {
+			t.Fatalf("test def %+v does not mirror build def %+v", tst, b)
+		}
+		if keyOf(t, root, img) == keyOf(t, root, img.TestOf()) {
+			t.Fatal("test K equals build K")
+		}
+	}
+}
+
+func TestWholeTreeTestDefinition(t *testing.T) {
+	ctx, root := context.Background(), project(t)
+	l, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	s := spec.WholeTreeTest("/lib", "linux/amd64")
+	src, err := l.SourceFor(ctx, root, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole, err := l.Ingest(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src.String() != whole.String() {
+		t.Fatalf("source %s, want the unpruned root %s", src, whole)
+	}
+	d := decodeDef(t, root, s)
+	if d.Dir != "lib" || d.Ctx != builddef.CtxWidened || !d.Test {
+		t.Fatalf("def = %+v", d)
+	}
+	if _, err := l.SourceFor(ctx, root, spec.WholeTreeTest("/nope", "linux/amd64")); err == nil || !strings.Contains(err.Error(), "/nope is not in the project tree") {
+		t.Fatalf("missing dir: %v", err)
+	}
+}
+
+func TestWholeTreeTestRootHasNoDir(t *testing.T) {
+	root := project(t)
+	d := decodeDef(t, root, spec.WholeTreeTest("/", "linux/amd64"))
+	if d.Dir != "" || d.Ctx != 0 || !d.Test {
+		t.Fatalf("root test def = %+v", d)
+	}
+}
+
+func TestTestDirs(t *testing.T) {
+	ctx, root := context.Background(), project(t)
+	writeFile(t, root, "services/a/TESTS.jobs", "def test(): pass\n")
+	writeFile(t, root, "lib/TESTS.jobs", "def test(): pass\n")
+	writeFile(t, root, "ignored/TESTS.jobs", "def test(): pass\n")
+	writeFile(t, root, ".amberignore", "/ignored\n")                                       // the syntax TestSourceForErrors already relies on
+	if err := os.MkdirAll(filepath.Join(root, "other", "TESTS.jobs"), 0o755); err != nil { // a directory, not a test
+		t.Fatal(err)
+	}
+	l, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	dirs, err := l.TestDirs(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/lib", "/services/a"}; !reflect.DeepEqual(dirs, want) {
+		t.Fatalf("TestDirs = %v, want %v", dirs, want)
+	}
+	writeFile(t, root, "TESTS.jobs", "def test(): pass\n")
+	l2, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+	dirs, err = l2.TestDirs(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/", "/lib", "/services/a"}; !reflect.DeepEqual(dirs, want) {
+		t.Fatalf("TestDirs with root = %v, want %v", dirs, want)
 	}
 }

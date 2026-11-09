@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -208,6 +209,18 @@ func (l *Local) Ingest(ctx context.Context, dir string) (Source, error) {
 // normalized metadata (jobs-iroh's covered tree). Every path must be in the
 // ingested project tree; one that is missing is an error naming it.
 func (l *Local) SourceFor(ctx context.Context, root string, s spec.BuildSpec) (Source, error) {
+	if s.WholeTree {
+		// The whole project tree is the source, unpruned; s.Path is the
+		// directory inside it the test runs in.
+		rootKey, err := l.ingestRoot(ctx, root)
+		if err != nil {
+			return Source{}, err
+		}
+		if err := l.checkDir(ctx, root, rootKey, "test", s, s.Path); err != nil {
+			return Source{}, err
+		}
+		return Source{key: rootKey, keyStr: rootKey.String(), valid: true}, nil
+	}
 	if len(s.Sources) == 0 {
 		return l.Ingest(ctx, spec.SourceDir(root, s.Path))
 	}
@@ -216,24 +229,14 @@ func (l *Local) SourceFor(ctx context.Context, root string, s spec.BuildSpec) (S
 		return Source{}, err
 	}
 	for _, p := range append([]string{s.Path}, s.Sources...) {
-		mode, ok, err := l.lookup(ctx, rootKey, p)
-		if err != nil {
-			return Source{}, fmt.Errorf("image %s: resolve %s in the project tree: %w", s.DisplayName(), p, err)
-		}
-		if !ok {
-			hint := ""
-			if _, statErr := os.Lstat(spec.SourceDir(root, p)); statErr == nil {
-				// On disk but not ingested. Lstat also succeeds for another
-				// spelling on a case-insensitive filesystem, where the tree
-				// holds the name as it is on disk.
-				hint = " (it exists on disk but was not ingested: an .amberignore excludes it, or the path is spelled with a different case)"
+		if p == s.Path {
+			// The build directory must be a real directory of the tree: the
+			// server resolves it without following symlinks.
+			if err := l.checkDir(ctx, root, rootKey, "image", s, p); err != nil {
+				return Source{}, err
 			}
-			return Source{}, fmt.Errorf("image %s: %s is not in the project tree%s", s.DisplayName(), p, hint)
-		}
-		// The build directory must be a real directory of the tree: the
-		// server resolves it without following symlinks.
-		if p == s.Path && mode&unix.S_IFMT != unix.S_IFDIR {
-			return Source{}, fmt.Errorf("image %s: path %s is not a directory in the project tree (symlinks are not followed)", s.DisplayName(), p)
+		} else if err := l.checkExists(ctx, root, rootKey, "image", s, p); err != nil {
+			return Source{}, err
 		}
 	}
 	k, err := l.store.PruneTree(ctx, rootKey, s.Keep())
@@ -241,6 +244,80 @@ func (l *Local) SourceFor(ctx context.Context, root string, s spec.BuildSpec) (S
 		return Source{}, fmt.Errorf("image %s: prune the project tree: %w", s.DisplayName(), err)
 	}
 	return Source{key: k, keyStr: k.String(), valid: true}, nil
+}
+
+// checkExists verifies the "/"-rooted path p is in the ingested tree; kind
+// ("image" or "test") prefixes the error with the spec's display name.
+func (l *Local) checkExists(ctx context.Context, root string, rootKey key.Key, kind string, s spec.BuildSpec, p string) error {
+	_, err := l.checkEntry(ctx, root, rootKey, kind, s, p)
+	return err
+}
+
+// checkDir is checkExists plus: p must be a directory (symlinks are not
+// followed).
+func (l *Local) checkDir(ctx context.Context, root string, rootKey key.Key, kind string, s spec.BuildSpec, p string) error {
+	mode, err := l.checkEntry(ctx, root, rootKey, kind, s, p)
+	if err != nil {
+		return err
+	}
+	if mode&unix.S_IFMT != unix.S_IFDIR {
+		return fmt.Errorf("%s %s: path %s is not a directory in the project tree (symlinks are not followed)", kind, s.DisplayName(), p)
+	}
+	return nil
+}
+
+func (l *Local) checkEntry(ctx context.Context, root string, rootKey key.Key, kind string, s spec.BuildSpec, p string) (uint64, error) {
+	mode, ok, err := l.lookup(ctx, rootKey, p)
+	if err != nil {
+		return 0, fmt.Errorf("%s %s: resolve %s in the project tree: %w", kind, s.DisplayName(), p, err)
+	}
+	if !ok {
+		hint := ""
+		if _, statErr := os.Lstat(spec.SourceDir(root, p)); statErr == nil {
+			// On disk but not ingested. Lstat also succeeds for another
+			// spelling on a case-insensitive filesystem, where the tree
+			// holds the name as it is on disk.
+			hint = " (it exists on disk but was not ingested: an .amberignore excludes it, or the path is spelled with a different case)"
+		}
+		return 0, fmt.Errorf("%s %s: %s is not in the project tree%s", kind, s.DisplayName(), p, hint)
+	}
+	return mode, nil
+}
+
+// TestDirs returns the "/"-rooted slash paths, sorted, of every directory in
+// the ingested project tree under root that holds a regular file named
+// TESTS.jobs ("/" for the root itself).
+func (l *Local) TestDirs(ctx context.Context, root string) ([]string, error) {
+	rootKey, err := l.ingestRoot(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	var walk func(dir string) error
+	walk = func(dir string) error {
+		entries, err := l.store.Ls(ctx, rootKey, dir)
+		if err != nil {
+			return fmt.Errorf("list /%s in the project tree: %w", dir, err)
+		}
+		for _, e := range entries {
+			if e.Name == builddef.TestsFile && e.Mode&unix.S_IFMT == unix.S_IFREG {
+				dirs = append(dirs, "/"+dir)
+			}
+		}
+		for _, e := range entries {
+			if e.Mode&unix.S_IFMT == unix.S_IFDIR {
+				if err := walk(path.Join(dir, e.Name)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(""); err != nil {
+		return nil, err
+	}
+	sort.Strings(dirs)
+	return dirs, nil
 }
 
 // ingestRoot ingests the project root (honoring .amberignore files; .git is
@@ -325,8 +402,17 @@ func definition(src Source, s spec.BuildSpec) (canon []byte, k key.Key, err erro
 		Platform:  s.Platform,
 		Params:    params,
 		BuildFile: s.BuildFile,
+		Test:      s.Test,
 	}
-	if len(s.Sources) > 0 {
+	if s.WholeTree {
+		// The source is the whole project tree; the test runs in s.Path
+		// inside it, with the widened context.
+		def.Dir = strings.TrimPrefix(s.Path, "/")
+		if def.Dir == "" {
+			return nil, key.Key{}, errors.New("jobs: whole-tree context on a root spec")
+		}
+		def.Ctx = builddef.CtxWidened
+	} else if len(s.Sources) > 0 {
 		// The source is the project pruned to the spec's paths, so the
 		// build root is the service's directory inside it: a widened-context
 		// definition, exactly what jobs-iroh's own client builds for a
