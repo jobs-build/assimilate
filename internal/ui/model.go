@@ -88,7 +88,11 @@ type visRow struct {
 // model is the TUI. Quit is gated on closedMsg — the stream must drain
 // before the program ends — with one escape hatch: a second quit request
 // while already cancelling sets forceQuit and quits immediately, so a
-// stream that never closes cannot wedge the terminal.
+// stream that never closes cannot wedge the terminal. A close that leaves a
+// failed build does not quit by itself: the alt screen would take the
+// output that explains the failure down with it, so the TUI stays for
+// inspection until the next quit request (which, the stream being closed,
+// quits at once).
 type model struct {
 	rows     []buildRow
 	visible  []visRow // flattened two-level tree; selected indexes it
@@ -241,7 +245,12 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 	case closedMsg:
 		m.closed = true
 		m.flushLog()
-		return m, tea.Quit
+		if m.cancelling || !m.anyFailed() {
+			return m, tea.Quit
+		}
+		// Stay for inspection: land on the failing step; q leaves.
+		m.focusFailure()
+		return m, nil
 	}
 	return m, nil
 }
@@ -320,8 +329,12 @@ func (m *model) toggleExpanded() {
 // quitRequest handles q/ctrl-c/SIGINT: the first request fires cancel
 // exactly once and waits for the closed sentinel so the stream drains;
 // a second request while already cancelling force-quits past a stream
-// that never closes.
+// that never closes. Once the stream has closed (the failure hold) there
+// is nothing to cancel or drain: the request quits immediately.
 func (m model) quitRequest() (model, tea.Cmd) {
+	if m.closed {
+		return m, tea.Quit
+	}
 	if m.cancelling {
 		m.forceQuit = true
 		return m, tea.Quit
@@ -509,6 +522,51 @@ func (m model) anyBuilding() bool {
 		}
 	}
 	return false
+}
+
+func (m model) anyFailed() bool {
+	for _, r := range m.rows {
+		if r.state == spec.StateFailed {
+			return true
+		}
+	}
+	return false
+}
+
+// focusFailure selects the first failed image's failed graph row (the image
+// row itself when the server sent no graph), unfolding the image if needed,
+// so the right pane opens on the output that explains the failure.
+func (m *model) focusFailure() {
+	img := -1
+	for i := range m.rows {
+		if m.rows[i].state == spec.StateFailed {
+			img = i
+			break
+		}
+	}
+	if img < 0 {
+		return
+	}
+	if r := &m.rows[img]; r.graph != nil && !r.expanded {
+		r.expanded = true
+		m.rebuildVisible()
+	}
+	sel := -1
+	for i, v := range m.visible {
+		if v.img != img {
+			continue
+		}
+		if sel < 0 {
+			sel = i // the image row: the fallback
+		}
+		if row := m.graphRow(v); row != nil && row.Phase == wire.PhaseFailed {
+			sel = i
+			break
+		}
+	}
+	m.selected = sel
+	m.follow = true
+	m.layout() // the unfold may widen the left pane; refreshes the log too
 }
 
 func tickCmd() tea.Cmd {
@@ -831,18 +889,25 @@ func (m model) rightLines(w, h int) []string {
 }
 
 func (m model) footer() string {
-	done := 0
+	done, failed := 0, 0
 	for _, r := range m.rows {
 		if r.state.Terminal() {
 			done++
 		}
+		if r.state == spec.StateFailed {
+			failed++
+		}
 	}
 	base := fmt.Sprintf(" %d/%d done", done, len(m.rows))
 	var line string
-	if m.cancelling {
+	switch {
+	case m.cancelling:
 		line = styleDim.Render(base+" · ") + styleRed.Render("cancelling…") +
 			styleDim.Render(" (q again to force quit)")
-	} else {
+	case m.closed && failed > 0: // the failure hold: the run is over, q leaves
+		line = styleDim.Render(base+" · ") + styleRed.Render(fmt.Sprintf("%d failed", failed)) +
+			styleDim.Render(" · ↑/↓ select · ←/→ fold · PgUp/PgDn scroll · q exit")
+	default:
 		line = styleDim.Render(base + " · ↑/↓ select · ←/→ fold · PgUp/PgDn scroll · q cancel")
 	}
 	if m.globalNote != "" {

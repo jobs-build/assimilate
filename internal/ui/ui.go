@@ -22,6 +22,16 @@ import (
 // and closes — the TUI never exits before the stream ends, so terminal
 // state is consistent); a second 'q'/ctrl-c while cancelling force-quits
 // without waiting for the drain. A footer shows done/total and key help.
+//
+// A stream that closes with a failed build does not end the program: the
+// screen stays, focused on the failing step's output, until 'q'/ctrl-c —
+// an alt screen keeps nothing once it is gone. A close after the user
+// cancelled quits at once, failures or not.
+//
+// For the program's lifetime the process's default loggers (slog and log,
+// which libraries such as amberclient and go-iroh write to) are routed into
+// the footer note instead of stderr, which on a terminal is this very
+// screen; the previous loggers are restored on return.
 func RunTUI(ctx context.Context, cancel context.CancelFunc, names []string, events <-chan spec.Event) error {
 	m := newModel(names, cancel, time.Now)
 	// The program's lifetime is bound to the event stream, not to ctx:
@@ -34,6 +44,15 @@ func RunTUI(ctx context.Context, cancel context.CancelFunc, names []string, even
 		tea.WithMouseCellMotion(),
 		tea.WithFilter(quitFilter),
 	)
+
+	// Library log lines become global notes (footer, right). Send on a
+	// finished program is a no-op, so a record logged after the screen is
+	// gone is dropped rather than written anywhere; restore then returns
+	// later records to stderr.
+	restore := captureLogs(func(line string) {
+		p.Send(eventMsg{spec.Event{Build: -1, Kind: spec.KindLog, Line: line}})
+	})
+	defer restore()
 
 	// Pump: every event becomes a msg; the channel close becomes the quit
 	// sentinel. Send on a finished program is a no-op, so the pump keeps

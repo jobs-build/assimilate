@@ -849,3 +849,92 @@ func TestOldServerNotExpandable(t *testing.T) {
 		t.Fatalf("visible = %d rows, want just the image row", len(m.visible))
 	}
 }
+
+// --- failure stays on screen ---
+
+// A run that ends with a failure keeps the TUI open for inspection — the
+// alt screen would otherwise take the failure output down with it — until
+// the user quits. The stream is already closed, so quitting is immediate
+// and fires no cancel.
+func TestStayOpenOnFailureUntilQuit(t *testing.T) {
+	for _, quit := range []struct {
+		name string
+		msg  tea.Msg
+	}{{"q", key("q")}, {"ctrl+c", key("ctrl+c")}, {"sigint", cancelReq{}}} {
+		t.Run(quit.name, func(t *testing.T) {
+			var cancelled int
+			m := newTestModel(t, []string{"a", "b"}, &cancelled, nil)
+			m = drive(m, sizeMsg(80, 24),
+				stateEv(0, spec.StateBuilding), stateEv(1, spec.StateBuilding),
+				logEv(1, "compile error: boom"),
+				stateEv(0, spec.StateDone),
+				eventMsg{spec.Event{Build: 1, Kind: spec.KindState, State: spec.StateFailed, Info: "build failed"}})
+			m, cmd := m.update(closedMsg{})
+			if cmd != nil {
+				t.Fatal("closedMsg after a failure must not quit")
+			}
+			if !m.closed {
+				t.Fatal("closed flag not set")
+			}
+			v := m.View()
+			if !strings.Contains(v, "1 failed") || !strings.Contains(v, "q exit") {
+				t.Fatalf("footer must announce the failure and the exit key:\n%s", v)
+			}
+			if !strings.Contains(v, "compile error: boom") {
+				t.Fatalf("the failed build's output must be on screen:\n%s", v)
+			}
+			m, cmd = m.update(quit.msg)
+			if cmd == nil {
+				t.Fatal("quit request after close must quit")
+			}
+			if _, ok := cmd().(tea.QuitMsg); !ok {
+				t.Fatalf("command = %T, want tea.QuitMsg", cmd())
+			}
+			if cancelled != 0 {
+				t.Errorf("cancel called %d times after the stream closed, want 0", cancelled)
+			}
+		})
+	}
+}
+
+// Cancelling is the user leaving: the close that follows quits even when
+// builds ended failed rather than cancelled.
+func TestCloseWhileCancellingQuitsDespiteFailures(t *testing.T) {
+	m := newTestModel(t, []string{"a"}, nil, nil)
+	m = drive(m, sizeMsg(80, 24), stateEv(0, spec.StateBuilding), key("q"), stateEv(0, spec.StateFailed))
+	_, cmd := m.update(closedMsg{})
+	if cmd == nil {
+		t.Fatal("closedMsg while cancelling must quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("command = %T, want tea.QuitMsg", cmd())
+	}
+}
+
+// On a failed close the selection lands on the first failed image's failed
+// graph row, so the right pane opens on the failing step's own output.
+func TestFailureCloseFocusesFailedNode(t *testing.T) {
+	m := newTestModel(t, []string{"ok", "bad"}, nil, nil)
+	snap := graphSnap()
+	snap.Phase, snap.Terminal = wire.PhaseFailed, true
+	snap.Nodes[2].Phase, snap.Nodes[2].ErrSummary = wire.PhaseFailed, "boom"
+	snap.Nodes[0].Phase = wire.PhaseUpstream
+	br := snap.Nodes[2].Node
+	m = drive(m, sizeMsg(100, 24),
+		stateEv(0, spec.StateBuilding), stateEv(1, spec.StateBuilding),
+		stateEv(0, spec.StateDone),
+		snapEv(1, snap), nodeLogEv(1, br, "undefined: foo"),
+		eventMsg{spec.Event{Build: 1, Kind: spec.KindState, State: spec.StateFailed, Info: "build failed"}},
+		closedMsg{})
+	if m.selected >= len(m.visible) {
+		t.Fatal("selection out of range")
+	}
+	v := m.visible[m.selected]
+	row := m.graphRow(v)
+	if v.img != 1 || row == nil || row.Phase != wire.PhaseFailed {
+		t.Fatalf("selected = %+v (row %+v), want the failed graph row of image 1", v, row)
+	}
+	if s := m.View(); !strings.Contains(s, "undefined: foo") {
+		t.Fatalf("failed node's output not shown:\n%s", s)
+	}
+}
