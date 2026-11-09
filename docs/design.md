@@ -10,6 +10,8 @@ triggers an ArgoCD refresh/sync.
 assimilate deploy staging            # build → render → push → PR
 assimilate deploy staging --rollout  # … → merge PR → argocd refresh + sync
 assimilate render staging            # render to stdout without building
+assimilate test staging              # run the TESTS.jobs of staging's images and the project tree
+assimilate test                      # … with the images of every environment
 ```
 
 (`render` resolves exact image references offline: the build key K is the hash
@@ -190,6 +192,102 @@ assimilate imports jobs-iroh's exported packages directly — no shelling out:
    same jobs-server) that syncs and serves build outputs on demand. First
    pull of a fresh K is slow (on-demand assembly); rollout probes tolerate it.
 
+## Tests
+
+`assimilate test [environment] [--plain] [--list]` runs the monorepo's
+jobs-iroh tests (v0.36.0): a `TESTS.jobs` beside a `BUILD.jobs` defines
+`test()`, which runs in the build sandbox with the directory's build as the
+predeclared `build` input and produces no output. It is a second client of the
+machinery above, not a second pipeline: a test is a `BuildSpec` with `Test`
+set, `definition` sets `builddef.Definition.Test` from it, and `builds.Run`
+groups, ingests, pushes, submits and follows tests exactly like builds, feeding
+the same TUI (a `testvalue` folds like a `buildvalue`, its terminal stage
+named `test`). `assimilate.yaml` is never loaded; the server is needed except
+for `--list`.
+
+**Changed is the server's call.** assimilate never reads history or compares
+trees. jobs-iroh keys a test by KT — script, environment, covered sources,
+platform and the content of every input — and records `test-passed:<KT>` on a
+pass; a submit whose KT has that record is not run. A failed test leaves no
+record and re-runs. The pass is visible in the terminal snapshot in two
+shapes, and both count as a hit (`builds.Result.Cached`, `(cached)` in the
+TUI, "already passed" in the summary): an unchanged tree fast-paths at the
+request's own node, whose `testvalue` is created `Cached` with no `testrun`
+node at all; a tree that changed in ways the test does not cover (new K,
+same KT) creates a `testrun` node that is `Cached`.
+
+**Discovery is a union** (`internal/tests`).
+
+- *Template tests*: each in-scope `jobs-build` image (environments in sorted
+  order, appearance order within one) whose `path` holds a `TESTS.jobs`
+  becomes a test with the image's exact source tree, `Dir`, `Ctx`, platform
+  and params. That is what makes the test's `build` input the image's build
+  (same `Source`, `Dir`, `Ctx`, platform, params → same K), so it joins the
+  image's node and memo-hits when the image was built before. The test
+  definition carries an empty `BuildFile`, since jobs-iroh reads that field
+  as the test recipe path too; consequently `build-file` is not part of a
+  test's identity, and an image with `build-file: BUILD.prod` is tested
+  against the directory's `BUILD.jobs` build (a jobs-iroh rule, documented
+  rather than worked around). Identity is (path, sources or context mode,
+  platform, args): the same image in two environments, or two images
+  differing only in `build-file`, are one test.
+- *Project-tree tests*: the project root is ingested the way images with
+  `sources` already do (`Local.ingestRoot`; `.amberignore` honored, `.git`
+  never) and the amber tree is walked with `Store.Ls`; every directory with
+  a regular file `TESTS.jobs` is a candidate. Walking the ingested tree
+  rather than the filesystem means discovery sees exactly what a build can
+  see: an ignored `TESTS.jobs` is not a test, and nothing found can fail
+  later with "is not in the project tree". Candidates whose directory is an
+  image path in scope are dropped — the template wins, because it supplies
+  the platform and params that make the test join the image's build — and the
+  rest are sorted by path.
+
+Template tests come first in the row list, then project-tree tests. Labels are
+the image's display name or `<path> <platform>`; colliding labels fall back,
+for every row involved, to `<path> <platform>` plus sorted `key=value` args
+(and `sources=`).
+
+**Whole-tree context.** A project-tree test at a non-root path gets the whole,
+unpruned project tree as `Source`, with `Dir` the path and `Ctx = widened` —
+`jobs-client test`'s own default (git root as context), so a developer who ran
+`jobs-client remote-test` there against a checkout rooted at the project
+produced the same K. A library has no template object to declare `sources`
+on, and sibling references (`//lib/common`, Go `replace` directives) must
+resolve, so the whole tree is the only context that needs no declaration. The
+price is a delta push of the tree per run and server-side evaluation churn:
+any unrelated edit changes K and F. That is acceptable because a test's
+covered sources are its directory, its `closure` and what the plugins detect,
+computed at pin time — a wider context does not widen KT, so the memo, and
+with it whether the test runs, is untouched. A `TESTS.jobs` at the root itself
+is a root test: the root tree, no `Dir`, default `Ctx`, like `path: /`.
+(`amber.PruneTree` refuses a keep set that resolves to the context root, which
+is why the whole-tree context is the tree itself, not a prune.)
+
+**The sidecar.** Platform is an input to `test()` (the read-only `platform`
+global), not something the recipe returns, so a test that is not an image
+needs it declared: `assimilate-tests.yaml` beside the `TESTS.jobs`, decoded
+with `KnownFields(true)` like the environment config — one key, `platforms`,
+a non-empty list of non-empty strings, and the test runs once per platform
+with no params. The name is not `assimilate.yaml`, which already means the
+environment config with another schema. A missing or invalid file is a
+preflight error from discovery, before any push, naming the directory and the
+file to create: every `TESTS.jobs` ends up in the run or in an error, never
+silently skipped, and nothing is inferred (no default platform, no flag).
+Where the directory is an image path in scope the sidecar is ignored, so the
+same directory tests the shipped artifact when the environment deploys it and
+runs where the file says otherwise; `--list` marks the ignored file in the
+origin column.
+
+**Run and report.** Phase `done` is a pass, `failed` a failure, `cancelled` a
+cancellation; `builds.Run`'s concurrency, SIGINT cancel and drain rules apply
+unchanged. The summary line counts passed, already passed (the memo hits, a
+subset of passed), failed and — when any — cancelled; failures and
+cancellations are listed on stderr; the exit status is non-zero when any test
+did not end `done`. `--list` prints label, path, platform, args and origin per
+test, then the in-scope images whose path has no `TESTS.jobs`, from the local
+ingest alone. A server older than jobs-iroh v0.36.0 rejects a definition with
+the `test` field at the canonicality check; that error is surfaced as is.
+
 ## UI
 
 On a PTY, a bubbletea TUI with a **two-level tree: image, then build**.
@@ -276,7 +374,8 @@ internal/spec/        shared types: BuildSpec, BuildStatus, Event, Config, Image
 internal/project/     root discovery, env enumeration, assimilate.yaml loading
 internal/tmpl/        template scan/extract (yaml.v3 node level), render with substitutions
 internal/jobs/        jobs-iroh client: store, ingest, push, submit, watch, log follow
-internal/builds/      orchestration: dedupe, run all builds, emit spec.Event stream
+internal/builds/      orchestration: dedupe, run all builds (and tests), emit spec.Event stream
+internal/tests/       TESTS.jobs discovery: template paths ∪ project tree, sidecar platforms, labels
 internal/ui/          bubbletea TUI + plain-line renderer, both consuming spec.Events
 internal/ownership/   generated-file markers (hash + domain): YAML comment header, JSON sidecar; scan, remove
 internal/gitops/      go-git clone/branch/commit/push + provider PR create/merge (GitHub, Forgejo)
