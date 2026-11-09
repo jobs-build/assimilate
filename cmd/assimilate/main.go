@@ -463,13 +463,13 @@ func runTests(c *cli.Context) error {
 		return listTests(c.App.Writer, set)
 	}
 
+	if len(set.Tests) == 0 {
+		fmt.Fprintln(c.App.Writer, testSummary(nil))
+		return nil
+	}
 	server := os.Getenv("JOBS_SERVER")
 	if server == "" {
 		return errors.New("JOBS_SERVER must be set (jobs-iroh server endpoint ID)")
-	}
-	if len(set.Tests) == 0 {
-		fmt.Println(testSummary(nil))
-		return nil
 	}
 	specs := make([]spec.BuildSpec, len(set.Tests))
 	names := make([]string, len(set.Tests))

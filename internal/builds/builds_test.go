@@ -750,6 +750,24 @@ func TestRunGroupsBySource(t *testing.T) {
 	}
 }
 
+func TestFailedDetailWording(t *testing.T) {
+	specs := []spec.BuildSpec{
+		{Name: "t", Path: "/a", Platform: "linux/amd64", Test: true},
+		{Name: "b", Path: "/b", Platform: "linux/amd64"},
+	}
+	f := &fake{follow: map[string]followFn{
+		"t": staticFollow(spec.StateFailed, nil),
+		"b": staticFollow(spec.StateFailed, nil),
+	}}
+	results, _, err := runCollect(t, context.Background(), "/proj", "", specs, f)
+	if err == nil {
+		t.Fatal("want a run error")
+	}
+	if results[0].Err != "test failed" || results[1].Err != "build failed" {
+		t.Errorf("Err = %q, %q; want \"test failed\", \"build failed\"", results[0].Err, results[1].Err)
+	}
+}
+
 func TestResultCached(t *testing.T) {
 	snapWith := func(nodes ...api.NodeSnap) followFn {
 		return func(_ context.Context, sink jobs.Sink) (spec.BuildState, error) {

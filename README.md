@@ -348,16 +348,19 @@ identity. An image with `build-file: BUILD.prod` has its tests run against the
 **`--list`** prints what would run and exits without contacting a server (the
 local ingest only), so `JOBS_SERVER` is not needed: one row per test with its
 label, path, platform, args and origin (the image and the environments it
-appears in, or `assimilate-tests.yaml`), then a line
-`images without TESTS.jobs: …` naming the in-scope images that have no test.
-A test of the same label as another is shown as `<path> <platform>` plus its
-sorted `key=value` args.
+appears in, or `assimilate-tests.yaml`), then, only when
+there are such images, a line `images without TESTS.jobs: …` naming the
+in-scope images that have no test. When no test was discovered it prints
+`no tests found`. A test of the same label as another is shown as
+`<path> <platform>` plus its sorted `key=value` args, and `sources=…` when the
+test has sources.
 
 `--plain` forces plain prefixed lines, as for `deploy`. When the run ends,
 one line reports `N passed (M already passed), K failed` (plus `, C cancelled`
 when there are any); each failed or cancelled test is listed on stderr. The
 exit status is non-zero when any test failed or was cancelled, zero otherwise
-— including when no test was found, which is reported as such.
+— including when no test was found, which is reported as such and, like
+`--list`, needs no `JOBS_SERVER`.
 
 ## Development
 

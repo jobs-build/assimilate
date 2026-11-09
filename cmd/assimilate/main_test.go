@@ -221,6 +221,18 @@ func TestTestCommandWithoutServer(t *testing.T) {
 	if _, err := run("staging"); err == nil || err.Error() != "JOBS_SERVER must be set (jobs-iroh server endpoint ID)" {
 		t.Fatalf("no server: err = %v", err)
 	}
+
+	// Nothing found needs no server either.
+	empty := t.TempDir()
+	writeTree(t, empty, map[string]string{
+		"assimilate-templates/staging/other.yaml": "kind: x\n",
+		"README.md": "hi\n",
+	})
+	t.Chdir(empty)
+	out, err = run("staging")
+	if err != nil || out != "no tests found\n" {
+		t.Fatalf("empty set: out = %q, err = %v", out, err)
+	}
 }
 
 func TestTestSummary(t *testing.T) {

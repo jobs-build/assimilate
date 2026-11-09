@@ -279,7 +279,11 @@ func (r *runner) build(i int, src jobs.Source) {
 	case st == spec.StateCancelled:
 		r.finish(i, spec.StateCancelled, "cancelled")
 	case st == spec.StateFailed:
-		r.finish(i, spec.StateFailed, "build failed")
+		detail := "build failed"
+		if r.specs[i].Test {
+			detail = "test failed"
+		}
+		r.finish(i, spec.StateFailed, detail)
 	default:
 		r.finish(i, spec.StateFailed, fmt.Sprintf("follow ended in non-terminal state %q", st))
 	}
