@@ -59,28 +59,31 @@ func EnvDir(root, env string) (string, error) {
 	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
 		return dir, nil
 	}
-	avail := listEnvs(filepath.Join(root, TemplatesDir))
-	if len(avail) == 0 {
-		return "", fmt.Errorf("environment %q not found: %s contains no environments", env, filepath.Join(root, TemplatesDir))
+	avail, err := Envs(root)
+	if err != nil {
+		return "", fmt.Errorf("environment %q not found: %w", env, err)
 	}
 	return "", fmt.Errorf("environment %q not found; available: %s", env, strings.Join(avail, ", "))
 }
 
-// listEnvs returns the environment names (subdirectories of templatesDir),
-// sorted; nil when the directory is unreadable or holds none.
-func listEnvs(templatesDir string) []string {
-	entries, err := os.ReadDir(templatesDir)
-	if err != nil {
-		return nil
-	}
+// Envs returns the environment names of the project at root (the
+// subdirectories of TemplatesDir), sorted; an error when there are none or
+// the directory is unreadable.
+func Envs(root string) ([]string, error) {
+	dir := filepath.Join(root, TemplatesDir)
 	var envs []string
-	for _, e := range entries {
-		if e.IsDir() {
-			envs = append(envs, e.Name())
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				envs = append(envs, e.Name())
+			}
 		}
 	}
+	if len(envs) == 0 {
+		return nil, fmt.Errorf("%s contains no environments", dir)
+	}
 	sort.Strings(envs)
-	return envs
+	return envs, nil
 }
 
 // fileConfig mirrors assimilate.yaml exactly; KnownFields(true) turns any

@@ -2,19 +2,24 @@
 // image referenced by the environment's templates on a jobs-iroh server,
 // renders the manifests with the resulting image references, publishes them
 // to the GitOps repo as a PR, and with --rollout merges the PR and triggers
-// the ArgoCD refresh/sync.
+// the ArgoCD refresh/sync. `assimilate test` runs the monorepo's TESTS.jobs
+// on the same server, whose test-passed memo decides which actually run.
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
@@ -26,6 +31,7 @@ import (
 	"github.com/jobs-build/assimilate/internal/project"
 	"github.com/jobs-build/assimilate/internal/spec"
 	"github.com/jobs-build/assimilate/internal/tealogin"
+	"github.com/jobs-build/assimilate/internal/tests"
 	"github.com/jobs-build/assimilate/internal/tmpl"
 	"github.com/jobs-build/assimilate/internal/ui"
 )
@@ -42,7 +48,7 @@ func main() {
 func newApp() *cli.App {
 	return &cli.App{
 		Name:  "assimilate",
-		Usage: "deploy a monorepo's k8s resources: jobs-iroh builds → rendered manifests → GitOps PR → ArgoCD",
+		Usage: "deploy a monorepo's k8s resources (jobs-iroh builds → rendered manifests → GitOps PR → ArgoCD) and run its TESTS.jobs",
 		Commands: []*cli.Command{
 			{
 				Name:      "deploy",
@@ -61,6 +67,16 @@ func newApp() *cli.App {
 				Usage:     "render the environment's manifests with resolved image refs to stdout (no server, no build)",
 				ArgsUsage: "<environment>",
 				Action:    render,
+			},
+			{
+				Name:      "test",
+				Usage:     "run the monorepo's TESTS.jobs on the jobs-iroh server (every environment's images when none is given)",
+				ArgsUsage: "[environment]",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "plain", Usage: "plain line output even on a TTY"},
+					&cli.BoolFlag{Name: "list", Usage: "print the discovered tests and exit without connecting to a server"},
+				},
+				Action: runTests,
 			},
 		},
 	}
@@ -83,7 +99,7 @@ func reorderArgs(args []string) []string {
 		return args
 	}
 	switch args[1] {
-	case "deploy", "render":
+	case "deploy", "render", "test":
 	default:
 		return args
 	}
@@ -242,13 +258,9 @@ func deploy(c *cli.Context) error {
 			defer close(events)
 			results, runErr = builds.Run(bctx, root, cfg.Registry, x.Builds, client, events)
 		}()
-		if !c.Bool("plain") && term.IsTerminal(int(os.Stdout.Fd())) {
-			if err := ui.RunTUI(bctx, cancel, names, events); err != nil {
-				<-done
-				return err
-			}
-		} else {
-			ui.RunPlain(os.Stderr, names, events)
+		if err := showRun(c, bctx, cancel, names, events); err != nil {
+			<-done
+			return err
 		}
 		<-done
 		if runErr != nil {
@@ -304,6 +316,17 @@ func deploy(c *cli.Context) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// showRun renders a run's events until the stream closes: the TUI on a
+// terminal unless --plain, plain lines on stderr otherwise. A TUI error is
+// returned as soon as the TUI exits; the caller still waits for the run.
+func showRun(c *cli.Context, bctx context.Context, cancel context.CancelFunc, names []string, events <-chan spec.Event) error {
+	if !c.Bool("plain") && term.IsTerminal(int(os.Stdout.Fd())) {
+		return ui.RunTUI(bctx, cancel, names, events)
+	}
+	ui.RunPlain(os.Stderr, names, events)
 	return nil
 }
 
@@ -378,6 +401,195 @@ func render(c *cli.Context) error {
 		fmt.Printf("# --- %s ---\n%s\n", p, files[p])
 	}
 	return nil
+}
+
+// testScope resolves the test command's scope: the project root and the
+// scanned templates of the named environment, or of every environment in
+// name order when none is named. assimilate.yaml is not loaded: tests need
+// no registry, git or ArgoCD settings.
+func testScope(c *cli.Context) (root string, envs []tests.Env, err error) {
+	if c.NArg() > 1 {
+		return "", nil, errors.New("usage: assimilate test [environment]")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", nil, err
+	}
+	if root, err = project.FindRoot(cwd); err != nil {
+		return "", nil, err
+	}
+	names := c.Args().Slice()
+	if len(names) == 0 {
+		if names, err = project.Envs(root); err != nil {
+			return "", nil, err
+		}
+	}
+	for _, name := range names {
+		envDir, err := project.EnvDir(root, name)
+		if err != nil {
+			return "", nil, err
+		}
+		x, err := tmpl.Scan(envDir)
+		if err != nil {
+			return "", nil, err
+		}
+		envs = append(envs, tests.Env{Name: name, Builds: x.Builds})
+	}
+	return root, envs, nil
+}
+
+// runTests discovers the scope's TESTS.jobs and runs them on the jobs-iroh
+// server, whose test-passed memo decides which actually run; with --list it
+// prints the discovered set instead, without a server. A missing or invalid
+// assimilate-tests.yaml stops it in discovery, before any dial or push.
+func runTests(c *cli.Context) error {
+	root, envs, err := testScope(c)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signalContext(c.Context)
+	defer stop()
+
+	local, err := jobs.Open(jobs.DefaultDataDir())
+	if err != nil {
+		return err
+	}
+	defer local.Close()
+	set, err := tests.Discover(ctx, root, envs, local)
+	if err != nil {
+		return err
+	}
+	if c.Bool("list") {
+		return listTests(c.App.Writer, set)
+	}
+
+	server := os.Getenv("JOBS_SERVER")
+	if server == "" {
+		return errors.New("JOBS_SERVER must be set (jobs-iroh server endpoint ID)")
+	}
+	if len(set.Tests) == 0 {
+		fmt.Println(testSummary(nil))
+		return nil
+	}
+	specs := make([]spec.BuildSpec, len(set.Tests))
+	names := make([]string, len(set.Tests))
+	for i, t := range set.Tests {
+		specs[i] = t.Spec
+		names[i] = t.Spec.Name
+	}
+	if err := preflightSources(ctx, local, root, specs); err != nil {
+		return err
+	}
+	client, err := jobs.Dial(ctx, local, jobs.Options{
+		Server: server,
+		Addrs:  splitAddrs(os.Getenv("JOBS_SERVER_ADDR")),
+	})
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	bctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	events := make(chan spec.Event, 256)
+	var results []builds.Result
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(events)
+		// Run's error restates the results in build wording; the tests'
+		// own error is derived from the results below.
+		results, _ = builds.Run(bctx, root, "", specs, client, events)
+	}()
+	if err := showRun(c, bctx, cancel, names, events); err != nil {
+		<-done
+		return err
+	}
+	<-done
+
+	for _, r := range results {
+		if r.State != spec.StateDone {
+			fmt.Fprintf(os.Stderr, "  %s: %s %s\n", r.Spec.Name, r.State, r.Err)
+		}
+	}
+	fmt.Println(testSummary(results))
+	if ctx.Err() == nil { // after a signal the sweep could only fail
+		local.MaybeGC(ctx) // opportunistic local-store sweep, at most daily
+	}
+
+	_, _, failed, cancelled := tally(results)
+	if bad := failed + cancelled; bad > 0 {
+		word := "failed"
+		if failed == 0 {
+			word = "cancelled"
+		}
+		return fmt.Errorf("%d of %d tests %s", bad, len(results), word)
+	}
+	return nil
+}
+
+// listTests prints the discovered set for --list: one row per test (label,
+// path, platform, args as sorted k=v, origin), then the in-scope images
+// whose path has no TESTS.jobs.
+func listTests(w io.Writer, set *tests.Set) error {
+	if len(set.Tests) == 0 {
+		fmt.Fprintln(w, "no tests found")
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	for _, t := range set.Tests {
+		args := "-"
+		if len(t.Spec.Args) > 0 {
+			kv := make([]string, 0, len(t.Spec.Args))
+			for _, k := range slices.Sorted(maps.Keys(t.Spec.Args)) {
+				kv = append(kv, k+"="+t.Spec.Args[k])
+			}
+			args = strings.Join(kv, " ")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", t.Spec.Name, t.Spec.Path, t.Spec.Platform, args, t.Origin())
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if len(set.Untested) > 0 {
+		names := make([]string, len(set.Untested))
+		for i, s := range set.Untested {
+			names[i] = s.DisplayName()
+		}
+		fmt.Fprintf(w, "images without TESTS.jobs: %s\n", strings.Join(names, ", "))
+	}
+	return nil
+}
+
+// tally counts test results: passed (done), cached (done on a memo hit, a
+// subset of passed), cancelled, and failed (every other state).
+func tally(results []builds.Result) (passed, cached, failed, cancelled int) {
+	for _, r := range results {
+		switch r.State {
+		case spec.StateDone:
+			passed++
+			if r.Cached {
+				cached++
+			}
+		case spec.StateCancelled:
+			cancelled++
+		default:
+			failed++
+		}
+	}
+	return passed, cached, failed, cancelled
+}
+
+// testSummary is the one line printed after a test run.
+func testSummary(results []builds.Result) string {
+	if len(results) == 0 {
+		return "no tests found"
+	}
+	passed, cached, failed, cancelled := tally(results)
+	s := fmt.Sprintf("%d passed (%d already passed), %d failed", passed, cached, failed)
+	if cancelled > 0 {
+		s += fmt.Sprintf(", %d cancelled", cancelled)
+	}
+	return s
 }
 
 func commitMessage(env string, results []builds.Result) string {

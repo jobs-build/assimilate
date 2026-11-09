@@ -17,6 +17,7 @@ import (
 	"github.com/adrg/xdg"
 	"github.com/urfave/cli/v2"
 
+	"github.com/jobs-build/assimilate/internal/builds"
 	"github.com/jobs-build/assimilate/internal/jobs"
 	"github.com/jobs-build/assimilate/internal/spec"
 )
@@ -72,6 +73,16 @@ func TestReorderArgs(t *testing.T) {
 			in:   []string{"assimilate", "deploy", "staging", "--adopt-legacy"},
 			want: []string{"assimilate", "deploy", "--adopt-legacy", "staging"},
 		},
+		{
+			name: "test with trailing flag",
+			in:   []string{"assimilate", "test", "staging", "--plain"},
+			want: []string{"assimilate", "test", "--plain", "staging"},
+		},
+		{
+			name: "test without environment",
+			in:   []string{"assimilate", "test", "--list"},
+			want: []string{"assimilate", "test", "--list"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := reorderArgs(tc.in); !slices.Equal(got, tc.want) {
@@ -110,6 +121,125 @@ func TestAppParsesTrailingRolloutFlag(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("deploy action never ran")
+	}
+}
+
+// TestAppParsesTestCommand drives the real cli.App: `assimilate test
+// staging --list --plain` parses both flags and one positional, and the
+// environment is optional.
+func TestAppParsesTestCommand(t *testing.T) {
+	app := newApp()
+	var got *cli.Context
+	for _, cmd := range app.Commands {
+		if cmd.Name == "test" {
+			cmd.Action = func(c *cli.Context) error {
+				got = c
+				return nil
+			}
+		}
+	}
+
+	args := reorderArgs([]string{"assimilate", "test", "staging", "--list", "--plain"})
+	if err := app.Run(args); err != nil {
+		t.Fatalf("app.Run(%q): %v", args, err)
+	}
+	if got == nil {
+		t.Fatal("test action never ran")
+	}
+	if !got.Bool("list") {
+		t.Error("list flag not parsed")
+	}
+	if !got.Bool("plain") {
+		t.Error("plain flag not parsed")
+	}
+	if got.NArg() != 1 {
+		t.Errorf("NArg = %d, want 1 (args %q)", got.NArg(), got.Args().Slice())
+	}
+	if got.Args().First() != "staging" {
+		t.Errorf("first arg = %q, want %q", got.Args().First(), "staging")
+	}
+
+	got = nil
+	if err := app.Run([]string{"assimilate", "test"}); err != nil {
+		t.Fatalf("app.Run(assimilate test): %v", err)
+	}
+	if got == nil {
+		t.Fatal("test action never ran without an environment")
+	}
+	if got.NArg() != 0 {
+		t.Errorf("NArg = %d, want 0 (args %q)", got.NArg(), got.Args().Slice())
+	}
+}
+
+// TestTestCommandWithoutServer drives `assimilate test` over a synthetic
+// project with no JOBS_SERVER: a TESTS.jobs with neither an image nor a
+// sidecar is reported before the missing server, --list needs no server, and
+// a run without one is refused after discovery.
+func TestTestCommandWithoutServer(t *testing.T) {
+	root := t.TempDir()
+	image := func(name, path string, args string) string {
+		return "containers:\n  - name: " + name + "\n    image:\n      type: jobs-build\n      name: " + name +
+			"\n      path: " + path + "\n      platform: linux/amd64\n" + args
+	}
+	writeTree(t, root, map[string]string{
+		"assimilate-templates/staging/api.yaml": image("api", "/services/api", "      args:\n        v: \"1\"\n        a: x\n"),
+		"assimilate-templates/staging/web.yaml": image("web", "/services/web", ""),
+		"services/api/BUILD.jobs":               "# recipe\n",
+		"services/api/TESTS.jobs":               "# tests\n",
+		"services/web/BUILD.jobs":               "# recipe\n",
+		"lib/proto/TESTS.jobs":                  "# tests\n",
+	})
+	t.Chdir(filepath.Join(root, "services"))
+	t.Setenv("ASSIMILATE_DATA_DIR", t.TempDir())
+	t.Setenv("JOBS_SERVER", "")
+	run := func(args ...string) (string, error) {
+		app := newApp()
+		var out strings.Builder
+		app.Writer = &out
+		err := app.Run(reorderArgs(append([]string{"assimilate", "test"}, args...)))
+		return out.String(), err
+	}
+
+	if _, err := run(); err == nil || !strings.Contains(err.Error(), "/lib/proto/TESTS.jobs: no platforms declared") {
+		t.Fatalf("missing sidecar: err = %v", err)
+	}
+
+	writeTree(t, root, map[string]string{"lib/proto/assimilate-tests.yaml": "platforms:\n  - linux/amd64\n  - linux/arm64\n"})
+	out, err := run("staging", "--list")
+	if err != nil {
+		t.Fatalf("--list: %v", err)
+	}
+	want := "" +
+		"api                     /services/api  linux/amd64  a=x v=1  image api (staging)\n" +
+		"/lib/proto linux/amd64  /lib/proto     linux/amd64  -        assimilate-tests.yaml\n" +
+		"/lib/proto linux/arm64  /lib/proto     linux/arm64  -        assimilate-tests.yaml\n" +
+		"images without TESTS.jobs: web\n"
+	if out != want {
+		t.Fatalf("--list output:\n%s\nwant:\n%s", out, want)
+	}
+
+	if _, err := run("staging"); err == nil || err.Error() != "JOBS_SERVER must be set (jobs-iroh server endpoint ID)" {
+		t.Fatalf("no server: err = %v", err)
+	}
+}
+
+func TestTestSummary(t *testing.T) {
+	done := builds.Result{State: spec.StateDone}
+	hit := builds.Result{State: spec.StateDone, Cached: true}
+	failed := builds.Result{State: spec.StateFailed}
+	cancelled := builds.Result{State: spec.StateCancelled}
+	for _, tc := range []struct {
+		in   []builds.Result
+		want string
+	}{
+		{nil, "no tests found"},
+		{[]builds.Result{done, hit, hit}, "3 passed (2 already passed), 0 failed"},
+		{[]builds.Result{done, failed}, "1 passed (0 already passed), 1 failed"},
+		{[]builds.Result{hit, cancelled, cancelled}, "1 passed (1 already passed), 0 failed, 2 cancelled"},
+	} {
+		if got := testSummary(tc.in); got != tc.want {
+			t.Errorf("testSummary = %q, want %q", got, tc.want)
+		}
 	}
 }
 
