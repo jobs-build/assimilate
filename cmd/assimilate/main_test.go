@@ -17,9 +17,9 @@ import (
 	"github.com/adrg/xdg"
 	"github.com/urfave/cli/v2"
 
-	"github.com/jobs-build/assimilate/internal/builds"
-	"github.com/jobs-build/assimilate/internal/jobs"
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/builds"
+	"github.com/jobs-build/assimilate/jobs"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 func TestReorderArgs(t *testing.T) {

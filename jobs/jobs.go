@@ -35,7 +35,7 @@ import (
 	"github.com/jobs-build/jobs-iroh/importdef"
 	"golang.org/x/sys/unix"
 
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // The client-facing server ALPNs (frozen contract — jobs-iroh/serve mounts

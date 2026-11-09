@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // fakeTree stands in for *jobs.Local: it lists dirs, or fails with err.

@@ -18,8 +18,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/google/go-github/v73/github"
 
-	"github.com/jobs-build/assimilate/internal/ownership"
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/ownership"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // markedAs returns body as ownership.WriteMarked stores a YAML file for

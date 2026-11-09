@@ -371,6 +371,11 @@ go test -race ./...
 
 See [docs/design.md](docs/design.md) for the architecture.
 
+The packages are importable from other Go modules
+(`github.com/jobs-build/assimilate/tests`, `/jobs`, `/builds`, `/spec`, …):
+nothing is under `internal/`. `cmd/assimilate` shows how they fit together;
+before 1.0 a minor release may change their APIs.
+
 ## License
 
 [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
