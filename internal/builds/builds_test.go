@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jobs-build/jobs-iroh/api"
+
 	"github.com/jobs-build/assimilate/internal/jobs"
 	"github.com/jobs-build/assimilate/internal/spec"
 )
@@ -745,5 +747,35 @@ func TestRunGroupsBySource(t *testing.T) {
 	}
 	if len(f.submits) != 4 {
 		t.Errorf("%d submits, want 4", len(f.submits))
+	}
+}
+
+func TestResultCached(t *testing.T) {
+	snapWith := func(nodes ...api.NodeSnap) followFn {
+		return func(_ context.Context, sink jobs.Sink) (spec.BuildState, error) {
+			sink.Snapshot(api.Snapshot{Phase: "done", Terminal: true, Nodes: nodes})
+			return spec.StateDone, nil
+		}
+	}
+	specs := []spec.BuildSpec{
+		{Name: "value-hit", Path: "/a", Platform: "linux/amd64", Test: true},
+		{Name: "run-hit", Path: "/b", Platform: "linux/amd64", Test: true},
+		{Name: "ran", Path: "/c", Platform: "linux/amd64", Test: true},
+		{Name: "build", Path: "/d", Platform: "linux/amd64"},
+	}
+	f := &fake{follow: map[string]followFn{
+		"value-hit": snapWith(api.NodeSnap{Node: "testvalue_00", Phase: "done", Cached: true}),
+		"run-hit":   snapWith(api.NodeSnap{Node: "testvalue_00", Phase: "done"}, api.NodeSnap{Node: "testrun_00", Phase: "done", Cached: true}),
+		"ran":       snapWith(api.NodeSnap{Node: "testvalue_00", Phase: "done"}, api.NodeSnap{Node: "testrun_00", Phase: "done"}, api.NodeSnap{Node: "import_00", Phase: "done", Cached: true}),
+		"build":     snapWith(api.NodeSnap{Node: "buildvalue_00", Phase: "done", Cached: true}),
+	}}
+	results, _, err := runCollect(t, context.Background(), "/proj", "", specs, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []bool{true, true, false, false} {
+		if results[i].Cached != want {
+			t.Errorf("%s: Cached = %v, want %v", specs[i].Name, results[i].Cached, want)
+		}
 	}
 }

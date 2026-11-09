@@ -7,10 +7,12 @@ package builds
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jobs-build/jobs-iroh/api"
+	"github.com/jobs-build/jobs-iroh/wire"
 
 	"github.com/jobs-build/assimilate/internal/jobs"
 	"github.com/jobs-build/assimilate/internal/spec"
@@ -36,6 +38,9 @@ type Result struct {
 	ImageRef string // registry reference; set once submitted
 	State    spec.BuildState
 	Err      string // short failure/cancellation detail
+	// Cached is set for a test that ended done on a memo hit: its testvalue or
+	// testrun node was already cached. Always false for builds.
+	Cached bool
 }
 
 // cancelGrace bounds each best-effort Cancel sent after ctx is cancelled.
@@ -257,7 +262,8 @@ func (r *runner) build(i int, src jobs.Source) {
 	r.results[i].ImageRef = spec.ImageRef(r.registry, h.K)
 	r.flight.add(i, h)
 	r.send(spec.Event{Build: i, Kind: spec.KindState, State: spec.StateBuilding})
-	st, err := r.b.Follow(r.followCtx, h, sink{build: i, events: r.events})
+	var last api.Snapshot
+	st, err := r.b.Follow(r.followCtx, h, sink{build: i, events: r.events, last: &last})
 	r.flight.remove(i)
 	switch {
 	case err != nil && r.ctx.Err() != nil:
@@ -268,6 +274,7 @@ func (r *runner) build(i int, src jobs.Source) {
 		// Outcome unknown (transport trouble) — surfaced as a failure.
 		r.finish(i, spec.StateFailed, err.Error())
 	case st == spec.StateDone:
+		r.results[i].Cached = cachedTest(&last)
 		r.finish(i, spec.StateDone, "")
 	case st == spec.StateCancelled:
 		r.finish(i, spec.StateCancelled, "cancelled")
@@ -284,6 +291,7 @@ func (r *runner) build(i int, src jobs.Source) {
 type sink struct {
 	build  int
 	events chan<- spec.Event
+	last   *api.Snapshot // latest snapshot forwarded; read after Follow returns
 }
 
 func (s sink) State(phase, counts string) {
@@ -294,6 +302,7 @@ func (s sink) State(phase, counts string) {
 }
 
 func (s sink) Snapshot(snap api.Snapshot) {
+	*s.last = snap
 	s.events <- spec.Event{Build: s.build, Kind: spec.KindSnapshot, Snap: &snap}
 }
 
@@ -348,4 +357,21 @@ func (f *flight) cancelOne(h jobs.Handle) {
 	cctx, cancel := context.WithTimeout(f.base, cancelGrace)
 	defer cancel()
 	_ = f.b.Cancel(cctx, h)
+}
+
+// cachedTest reports whether snap shows a test served from the memo: an
+// unchanged tree fast-paths at a Cached testvalue node (no testrun exists),
+// and a change the test does not cover yields a Cached testrun node. Cached
+// import or buildvalue nodes do not count. Names match by kind prefix, not
+// wire.ParseNodeName, so fake names like "testvalue_00" work.
+func cachedTest(snap *api.Snapshot) bool {
+	if snap == nil {
+		return false
+	}
+	for _, n := range snap.Nodes {
+		if n.Cached && (strings.HasPrefix(n.Node, wire.KindTestValue+"_") || strings.HasPrefix(n.Node, wire.KindTestRun+"_")) {
+			return true
+		}
+	}
+	return false
 }
