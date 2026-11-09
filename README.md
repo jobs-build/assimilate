@@ -15,6 +15,8 @@ ArgoCD refresh/sync.
 assimilate deploy staging            # build → render → push → PR
 assimilate deploy staging --rollout  # … and merge the PR + argocd refresh/sync
 assimilate render staging            # print rendered manifests (offline — no server, no build)
+assimilate test staging              # run the TESTS.jobs of the monorepo (images of staging + library tests)
+assimilate test                      # … with the images of every environment
 ```
 
 Run it from anywhere inside the monorepo; the root is found by walking up
@@ -43,7 +45,12 @@ assimilate-templates/
 services/
   api/
     BUILD.jobs             # a normal jobs-iroh recipe
+    TESTS.jobs             # its test (optional; see Tests)
     …
+lib/
+  proto/
+    TESTS.jobs             # a test that is not an image
+    assimilate-tests.yaml  # platforms for a test that is not an image
 ```
 
 ## Templates
@@ -271,6 +278,89 @@ git:
 No manifest changes → no PR (a `--rollout` still triggers the ArgoCD
 refresh/sync). Build outputs are never pulled locally: the cluster pulls from
 a jobs-registry pointed at the same server.
+
+## Tests
+
+```sh
+assimilate test [environment] [--plain] [--list]
+```
+
+jobs-iroh runs a `TESTS.jobs` next to a `BUILD.jobs` in the same sandbox as
+the build, with the directory's own build available as an input. `assimilate
+test` finds every `TESTS.jobs` of the monorepo, submits them all to the
+server, and follows them in the same TUI as `deploy` (one row per test,
+unfolding into its graph; plain lines without a TTY). It never reads
+`assimilate.yaml` — tests need no registry, GitOps or ArgoCD settings —
+and `JOBS_SERVER` (and optionally `JOBS_SERVER_ADDR`) are set as for
+`deploy`.
+
+**What "changed" means.** assimilate diffs nothing. A test is keyed by KT,
+derived from what the sandbox actually saw: the script, the environment, the
+covered sources, the platform and the content of every input. A test whose KT
+has a `test-passed` record on the server is not run again: it fast-paths and
+shows `(cached)` in the TUI, and the summary counts it as "already passed".
+So a run executes exactly the tests whose sources, as the test defines them,
+have no recorded pass. A failed test leaves no record and runs again next
+time.
+
+**Which tests.** The set is the union of two sources:
+
+- *Template tests.* Every `jobs-build` image in scope whose `path` holds a
+  `TESTS.jobs` is tested with the image's source tree, platform and `args`,
+  so the test's `build` input is the image's own build (same K) and joins it:
+  the test exercises the artifact `deploy` would ship, and an image built
+  before is not built again. `assimilate test staging` scopes the images to
+  that environment; `assimilate test` unions every environment under
+  `assimilate-templates/`. The same image in two environments is one test.
+- *Project-tree tests.* Every other `TESTS.jobs` in the project tree (the
+  ingested one: `.amberignore` applies, `.git` never) is a test too, but
+  nothing says where it runs, so the directory declares it in an
+  `assimilate-tests.yaml` next to the `TESTS.jobs`:
+
+  ```yaml
+  platforms:
+    - linux/amd64
+    - linux/arm64
+  ```
+
+  The file has one key, `platforms`, a non-empty list of non-empty strings;
+  anything else is an error naming the file. The test runs once per platform,
+  with the whole project tree as its context, so sibling references
+  (`//lib/common`, a Go `replace` directive) resolve without any declaration.
+  Unrelated edits elsewhere in the tree change K and cost the server an
+  evaluation, but not KT, so the test does not re-run.
+
+Nothing is inferred: a `TESTS.jobs` that is neither an image path in scope nor
+accompanied by the file is an error naming the directory and the file to
+create, and the command stops before anything is pushed. Where a directory is
+also an image path in scope, the template wins: platform and args come from
+the image and the sidecar file is ignored (`--list` says so).
+
+A template test's recipe needs the same `sources` as the image's build; a
+sibling the image does not list fails the test as it would fail the build.
+
+**`build-file`.** jobs-iroh's predeclared `build` input in a test is always
+the directory's `BUILD.jobs` build, and `build-file` never enters a test's
+identity. An image with `build-file: BUILD.prod` has its tests run against the
+`BUILD.jobs` build of its directory; two images that differ only in
+`build-file` are one test.
+
+**`--list`** prints what would run and exits without contacting a server (the
+local ingest only), so `JOBS_SERVER` is not needed: one row per test with its
+label, path, platform, args and origin (the image and the environments it
+appears in, or `assimilate-tests.yaml`), then, only when
+there are such images, a line `images without TESTS.jobs: …` naming the
+in-scope images that have no test. When no test was discovered it prints
+`no tests found`. A test of the same label as another is shown as
+`<path> <platform>` plus its sorted `key=value` args, and `sources=…` when the
+test has sources.
+
+`--plain` forces plain prefixed lines, as for `deploy`. When the run ends,
+one line reports `N passed (M already passed), K failed` (plus `, C cancelled`
+when there are any); each failed or cancelled test is listed on stderr. The
+exit status is non-zero when any test failed or was cancelled, zero otherwise
+— including when no test was found, which is reported as such and, like
+`--list`, needs no `JOBS_SERVER`.
 
 ## Development
 

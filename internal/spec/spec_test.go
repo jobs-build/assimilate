@@ -117,3 +117,41 @@ func TestSourceKeyAndKeep(t *testing.T) {
 		t.Errorf("Keep = %v, want %v", got, want)
 	}
 }
+
+func TestKeyTestFlags(t *testing.T) {
+	if got := (BuildSpec{Path: "/svc", Platform: "linux/amd64"}).Key(); got != "4:/svc0:11:linux/amd64" {
+		t.Fatalf("key of a plain spec moved: %q", got)
+	}
+	img := BuildSpec{Path: "/svc", Platform: "linux/amd64", BuildFile: "BUILD.prod", Args: map[string]string{"v": "1"}}
+	tst := img.TestOf()
+	if !tst.Test || tst.BuildFile != "" || tst.Name != "" || tst.Platform != img.Platform || tst.Args["v"] != "1" {
+		t.Fatalf("TestOf = %+v", tst)
+	}
+	if tst.Key() == img.Key() {
+		t.Fatal("a test keys like its build")
+	}
+	// build-file never enters a test's identity
+	if (BuildSpec{Path: "/svc", Platform: "linux/amd64", Args: map[string]string{"v": "1"}}).TestOf().Key() != tst.Key() {
+		t.Fatal("build-file leaked into the test key")
+	}
+	wt := WholeTreeTest("/lib", "linux/amd64")
+	if !wt.Test || !wt.WholeTree || wt.Path != "/lib" {
+		t.Fatalf("WholeTreeTest = %+v", wt)
+	}
+	if wt.Key() == (BuildSpec{Path: "/lib", Platform: "linux/amd64", Test: true}).Key() {
+		t.Fatal("whole-tree mode not in the key")
+	}
+	if root := WholeTreeTest("/", "linux/amd64"); root.WholeTree {
+		t.Fatal("a root test is not whole-tree")
+	}
+}
+
+func TestSourceKeyWholeTree(t *testing.T) {
+	a, b := WholeTreeTest("/lib", "linux/amd64"), WholeTreeTest("/svc", "linux/arm64")
+	if a.SourceKey() != b.SourceKey() {
+		t.Fatal("whole-tree specs must share one source")
+	}
+	if a.SourceKey() == (BuildSpec{Path: "/lib", Platform: "linux/amd64"}).SourceKey() {
+		t.Fatal("whole-tree source key collides with the subtree's")
+	}
+}

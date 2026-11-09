@@ -25,6 +25,12 @@ type BuildSpec struct {
 	BuildFile string            // recipe path relative to Path; "" = BUILD.jobs
 	Args      map[string]string // build params (jobs --param key=value)
 	Platform  string            // required, e.g. linux/amd64
+	// Test marks a TESTS.jobs test of Path rather than its build.
+	Test bool
+	// WholeTree means the source is the whole project tree and Path is the
+	// directory inside it (project-tree tests below the root). Never set with
+	// Sources, never on Path "/".
+	WholeTree bool
 }
 
 // Key is the canonical dedupe identity of a spec: two template objects with
@@ -56,7 +62,28 @@ func (s BuildSpec) Key() string {
 			comp(p)
 		}
 	}
+	if s.Test {
+		b.WriteString("|test")
+	}
+	if s.WholeTree {
+		b.WriteString("|wholetree")
+	}
 	return b.String()
+}
+
+// TestOf is the test of the spec's path: the same source, platform and args,
+// but the recipe is TESTS.jobs, so BuildFile and the display name do not carry.
+func (s BuildSpec) TestOf() BuildSpec {
+	s.Test = true
+	s.BuildFile = ""
+	s.Name = ""
+	return s
+}
+
+// WholeTreeTest is the test of path run against the whole project tree. The
+// root is its own tree already, so it is never whole-tree.
+func WholeTreeTest(path, platform string) BuildSpec {
+	return BuildSpec{Path: path, Platform: platform, Test: true, WholeTree: path != "/"}
 }
 
 // DisplayName is the TUI/CLI label: the explicit name, or "<path> <platform>".
@@ -163,6 +190,9 @@ func ImageRef(registry, k string) string {
 // SourceKey identifies the source tree a spec builds from — its path and
 // sources. Specs with equal SourceKeys share one ingest and one push.
 func (s BuildSpec) SourceKey() string {
+	if s.WholeTree {
+		return "wholetree"
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d:%s", len(s.Path), s.Path)
 	for _, p := range s.Sources {

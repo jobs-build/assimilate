@@ -147,6 +147,20 @@ func TestEnvDir(t *testing.T) {
 	}
 }
 
+func TestEnvs(t *testing.T) {
+	root := mkTree(t, []string{"assimilate-templates/staging", "assimilate-templates/prod"}, nil)
+	got, err := Envs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"prod", "staging"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Envs = %v, want %v", got, want)
+	}
+	if _, err := Envs(mkTree(t, []string{"assimilate-templates"}, nil)); err == nil || !strings.Contains(err.Error(), "contains no environments") {
+		t.Fatalf("empty: %v", err)
+	}
+}
+
 func TestLoadConfig(t *testing.T) {
 	tests := []struct {
 		name    string
