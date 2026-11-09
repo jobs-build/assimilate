@@ -17,7 +17,7 @@ import (
 	jitui "github.com/jobs-build/jobs-iroh/tui"
 	"github.com/jobs-build/jobs-iroh/wire"
 
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 const (

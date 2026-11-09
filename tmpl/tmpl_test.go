@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // writeTree materializes files (slash-relative path -> content) in a temp

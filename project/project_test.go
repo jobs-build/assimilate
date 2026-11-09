@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // mkTree creates dirs (relative, "/"-separated) and files (path → content)

@@ -15,8 +15,8 @@ import (
 
 	"github.com/jobs-build/jobs-iroh/api"
 
-	"github.com/jobs-build/assimilate/internal/jobs"
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/jobs"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // guard bounds waits that only a broken orchestrator would hit; tests never
@@ -583,7 +583,7 @@ func TestCancelDrainBound(t *testing.T) {
 			"a": func(fctx context.Context, _ jobs.Sink) (spec.BuildState, error) {
 				close(followed)
 				// The real Follow blocks in a stream read whose armed
-				// deadline (internal/jobs/conn.go) trips when fctx dies.
+				// deadline (jobs/conn.go) trips when fctx dies.
 				<-fctx.Done()
 				return "", fctx.Err()
 			},

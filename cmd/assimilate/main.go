@@ -24,16 +24,16 @@ import (
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
 
-	"github.com/jobs-build/assimilate/internal/argocd"
-	"github.com/jobs-build/assimilate/internal/builds"
-	"github.com/jobs-build/assimilate/internal/gitops"
-	"github.com/jobs-build/assimilate/internal/jobs"
-	"github.com/jobs-build/assimilate/internal/project"
-	"github.com/jobs-build/assimilate/internal/spec"
-	"github.com/jobs-build/assimilate/internal/tealogin"
-	"github.com/jobs-build/assimilate/internal/tests"
-	"github.com/jobs-build/assimilate/internal/tmpl"
-	"github.com/jobs-build/assimilate/internal/ui"
+	"github.com/jobs-build/assimilate/argocd"
+	"github.com/jobs-build/assimilate/builds"
+	"github.com/jobs-build/assimilate/gitops"
+	"github.com/jobs-build/assimilate/jobs"
+	"github.com/jobs-build/assimilate/project"
+	"github.com/jobs-build/assimilate/spec"
+	"github.com/jobs-build/assimilate/tealogin"
+	"github.com/jobs-build/assimilate/tests"
+	"github.com/jobs-build/assimilate/tmpl"
+	"github.com/jobs-build/assimilate/ui"
 )
 
 func main() {

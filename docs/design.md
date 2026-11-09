@@ -216,7 +216,7 @@ request's own node, whose `testvalue` is created `Cached` with no `testrun`
 node at all; a tree that changed in ways the test does not cover (new K,
 same KT) creates a `testrun` node that is `Cached`.
 
-**Discovery is a union** (`internal/tests`).
+**Discovery is a union** (`tests`).
 
 - *Template tests*: each in-scope `jobs-build` image (environments in sorted
   order, appearance order within one) whose `path` holds a `TESTS.jobs`
@@ -370,17 +370,23 @@ against an older server the image rows simply never become expandable.
 
 ```
 cmd/assimilate/       CLI entry (urfave/cli/v2, matching the jobs-iroh ecosystem)
-internal/spec/        shared types: BuildSpec, BuildStatus, Event, Config, ImageRef
-internal/project/     root discovery, env enumeration, assimilate.yaml loading
-internal/tmpl/        template scan/extract (yaml.v3 node level), render with substitutions
-internal/jobs/        jobs-iroh client: store, ingest, push, submit, watch, log follow
-internal/builds/      orchestration: dedupe, run all builds (and tests), emit spec.Event stream
-internal/tests/       TESTS.jobs discovery: template paths ∪ project tree, sidecar platforms, labels
-internal/ui/          bubbletea TUI + plain-line renderer, both consuming spec.Events
-internal/ownership/   generated-file markers (hash + domain): YAML comment header, JSON sidecar; scan, remove
-internal/gitops/      go-git clone/branch/commit/push + provider PR create/merge (GitHub, Forgejo)
-internal/argocd/      minimal ArgoCD REST client (refresh, sync)
+spec/                 shared types: BuildSpec, BuildStatus, Event, Config, ImageRef
+project/              root discovery, env enumeration, assimilate.yaml loading
+tmpl/                 template scan/extract (yaml.v3 node level), render with substitutions
+jobs/                 jobs-iroh client: store, ingest, push, submit, watch, log follow
+builds/               orchestration: dedupe, run all builds (and tests), emit spec.Event stream
+tests/                TESTS.jobs discovery: template paths ∪ project tree, sidecar platforms, labels
+ui/                   bubbletea TUI + plain-line renderer, both consuming spec.Events
+ownership/            generated-file markers (hash + domain): YAML comment header, JSON sidecar; scan, remove
+gitops/               go-git clone/branch/commit/push + provider PR create/merge (GitHub, Forgejo)
+argocd/               minimal ArgoCD REST client (refresh, sync)
+tealogin/             Forgejo/Gitea tokens from tea-style CLI configs, with OAuth refresh
 ```
+
+No package is under `internal/`: other Go modules may import them (a CI
+runner, say, that discovers with `tests` and runs with `builds`, reading the
+`spec.Event` stream the CLI's own UI reads). They are the CLI's own seams,
+exported as they are; before 1.0 a minor release may change them.
 
 Dependency direction: `cmd` → everything; `ui` and `builds` meet only at
 `spec` types (the TUI is testable by feeding synthetic events; orchestration is

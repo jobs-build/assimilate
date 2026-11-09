@@ -25,7 +25,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // Extraction is the scanned template set of one environment.

@@ -14,8 +14,8 @@ import (
 	"github.com/jobs-build/jobs-iroh/api"
 	"github.com/jobs-build/jobs-iroh/wire"
 
-	"github.com/jobs-build/assimilate/internal/jobs"
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/jobs"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // Backend abstracts the jobs client; *jobs.Client implements it, tests fake
@@ -53,7 +53,7 @@ const cancelGrace = 5 * time.Second
 var drainGrace = cancelGrace + 5*time.Second
 
 // maxInFlight bounds concurrent submit+Follow pairs: 60 watch streams + the
-// 24 log follows budgeted in internal/jobs (maxClientFollows) + transient
+// 24 log follows budgeted in jobs (maxClientFollows) + transient
 // one-shot calls (submit, cancel, log fetch) stays under the ~100 live
 // streams one QUIC connection supports.
 const maxInFlight = 60
@@ -77,7 +77,7 @@ func Run(ctx context.Context, root, registry string, specs []spec.BuildSpec, b B
 	// Follows outlive ctx: after cancellation the server-side Cancel drives
 	// them to a terminal snapshot, so they run detached — but time-bounded:
 	// if a Cancel frame is lost or the server never terminates the request,
-	// stopFollows trips every armed stream deadline (internal/jobs/conn.go)
+	// stopFollows trips every armed stream deadline (jobs/conn.go)
 	// so no Follow can block Run forever.
 	detached := context.WithoutCancel(ctx)
 	followCtx, stopFollows := context.WithCancel(detached)

@@ -12,7 +12,7 @@ import (
 	"github.com/jobs-build/jobs-iroh/api"
 	"github.com/jobs-build/jobs-iroh/wire"
 
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // testSink records State, Snapshot and Log calls; safe for concurrent

@@ -14,7 +14,7 @@ import (
 	"github.com/jobs-build/jobs-iroh/builddef"
 	"github.com/jobs-build/jobs-iroh/wire"
 
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 func TestDefaultDataDir(t *testing.T) {

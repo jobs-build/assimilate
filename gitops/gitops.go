@@ -25,8 +25,8 @@ import (
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/google/go-github/v73/github"
 
-	"github.com/jobs-build/assimilate/internal/ownership"
-	"github.com/jobs-build/assimilate/internal/spec"
+	"github.com/jobs-build/assimilate/ownership"
+	"github.com/jobs-build/assimilate/spec"
 )
 
 // Change is one publication: rendered files (paths relative to
